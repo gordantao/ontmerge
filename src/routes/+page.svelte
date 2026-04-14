@@ -98,7 +98,6 @@
       right: unknown;
       leftRegistry?: Record<string, ConceptMeta>;
       rightRegistry?: Record<string, ConceptMeta>;
-      suggestedMerge?: SuggestedMerge | SuggestedMergeV4 | null;
     };
   } = $props();
 
@@ -807,6 +806,160 @@
             }
             sourceMap = newSourceMap;
           }
+        } else if (imported.version === 4) {
+          const v4sm = imported as SuggestedMergeV4;
+          suggestionMetadata = v4sm.metadata;
+          pendingReviews = v4sm.pendingReview || [];
+          llmSuggestions = v4sm.llmSuggestions || null;
+          loadedFromSuggestion = v4sm.metadata?.source === "llm";
+
+          // Merge v4 concept metadata into the registry
+          for (const [id, meta] of Object.entries(v4sm.concepts)) {
+            conceptRegistry.set(id, meta);
+          }
+          conceptRegistry = new Map(conceptRegistry);
+
+          // Convert v4 id-keyed structure to name-keyed tree
+          mergedData = forceLowercaseTerms(
+            v4StructureToNameTree(v4sm.structure, v4sm.concepts),
+          );
+
+          // Initialize mergedPathToId before rebuilding subscriptions
+          mergedPathToId.clear();
+          initializePathIds(mergedData, "", mergedPathToId);
+          mergedPathToId = new Map(mergedPathToId);
+
+          // Translate v4 lineage (ID-keyed) → name-keyed LineageEntry map
+          const idToNamePath = buildV4IdToNamePath(v4sm.structure, v4sm.concepts);
+          const leftNameToPath = buildNameToSourcePath(leftPathToId);
+          const rightNameToPath = buildNameToSourcePath(rightPathToId);
+          const newLineage = translateV4Lineage(
+            v4sm.lineage ?? {},
+            idToNamePath,
+            v4sm.concepts,
+            leftNameToPath,
+            rightNameToPath,
+          );
+
+          // Fill missing lineage for leaf array items
+          function fillLineageV4(obj: unknown, basePath: string) {
+            if (obj && typeof obj === "object") {
+              if (Array.isArray(obj)) {
+                obj.forEach((item, idx) => {
+                  const childPath = `${basePath}/${idx}`;
+                  if (!newLineage.has(childPath)) {
+                    const parentLineage = newLineage.get(basePath);
+                    if (parentLineage) {
+                      newLineage.set(childPath, {
+                        sources: parentLineage.sources.map((s) => ({
+                          ...s,
+                          originalPath: `${s.originalPath}/${idx}`,
+                        })),
+                      });
+                    }
+                  }
+                  fillLineageV4(item, childPath);
+                });
+              } else {
+                Object.entries(obj as Record<string, unknown>).forEach(
+                  ([key, val]) => {
+                    const childPath = basePath ? `${basePath}/${key}` : key;
+                    if (!newLineage.has(childPath)) {
+                      const parentLineage = newLineage.get(basePath);
+                      if (parentLineage) {
+                        newLineage.set(childPath, {
+                          sources: parentLineage.sources.map((s) => ({
+                            ...s,
+                            originalPath: `${s.originalPath}/${key}`,
+                          })),
+                        });
+                      }
+                    }
+                    fillLineageV4(val, childPath);
+                  },
+                );
+              }
+            }
+          }
+          fillLineageV4(mergedData, "");
+          lineage = newLineage;
+
+          // Derive sourceMap from concept source metadata
+          const newSourceMap = new Map<string, string>();
+          for (const [idPath, namePath] of idToNamePath) {
+            const segments = idPath.split("/");
+            const lastId = segments[segments.length - 1];
+            if (/^\d+$/.test(lastId)) continue;
+            const src = v4sm.concepts[lastId]?.source ?? "merged";
+            const side =
+              src === "pathout" ? "left" : src === "who" ? "right" : src === "created" ? "created" : "both";
+            newSourceMap.set(namePath, side);
+          }
+          function fillSourceMapV4Import(
+            obj: unknown,
+            basePath: string,
+            parentSource: string | undefined,
+          ) {
+            if (obj && typeof obj === "object") {
+              if (Array.isArray(obj)) {
+                obj.forEach((item, idx) => {
+                  const childPath = `${basePath}/${idx}`;
+                  if (!newSourceMap.has(childPath) && parentSource) {
+                    newSourceMap.set(childPath, parentSource);
+                  }
+                  fillSourceMapV4Import(item, childPath, newSourceMap.get(childPath) || parentSource);
+                });
+              } else {
+                Object.entries(obj as Record<string, unknown>).forEach(
+                  ([key, val]) => {
+                    const childPath = basePath ? `${basePath}/${key}` : key;
+                    if (!newSourceMap.has(childPath) && parentSource) {
+                      newSourceMap.set(childPath, parentSource);
+                    }
+                    fillSourceMapV4Import(val, childPath, newSourceMap.get(childPath) || parentSource);
+                  },
+                );
+              }
+            }
+          }
+          fillSourceMapV4Import(mergedData, "", undefined);
+          sourceMap = newSourceMap;
+
+          // Rebuild subscriptions and subscriberInfo from lineage
+          const newSubscriptions = new Map<string, Set<string>>();
+          const newSubscriberInfo = new Map<
+            string,
+            { sourceId: string; source: "left" | "right"; isMerged: boolean }[]
+          >();
+          for (const [mergedPath, lineageEntry] of lineage.entries()) {
+            const subscriberId = mergedPathToId.get(mergedPath);
+            if (!subscriberId) continue;
+            const leftRightSources = lineageEntry.sources.filter(
+              (s) => s.panel === "left" || s.panel === "right",
+            );
+            const isMerged = leftRightSources.length > 1;
+            for (const src of leftRightSources) {
+              const panel = src.panel as "left" | "right";
+              const pathToId = panel === "left" ? leftPathToId : rightPathToId;
+              const sourceId = findMatchingSourceId(src.originalPath, pathToId);
+              if (sourceId) {
+                if (!newSubscriptions.has(sourceId)) {
+                  newSubscriptions.set(sourceId, new Set());
+                }
+                newSubscriptions.get(sourceId)!.add(subscriberId);
+                if (!newSubscriberInfo.has(subscriberId)) {
+                  newSubscriberInfo.set(subscriberId, []);
+                }
+                newSubscriberInfo.get(subscriberId)!.push({
+                  sourceId,
+                  source: panel,
+                  isMerged,
+                });
+              }
+            }
+          }
+          subscriptions = newSubscriptions;
+          subscriberInfo = newSubscriberInfo;
         }
 
         // Re-initialize merged path IDs
@@ -1427,6 +1580,32 @@
   }
 
   /**
+   * Find the stable source ID for a given path string, with normalization fallbacks.
+   */
+  function findMatchingSourceId(
+    originalPath: string,
+    pathToId: Map<string, string>,
+  ): string | undefined {
+    let sourceId = pathToId.get(originalPath);
+    if (sourceId) return sourceId;
+
+    sourceId = pathToId.get(originalPath.trim());
+    if (sourceId) return sourceId;
+
+    const normalizedPath = originalPath.replace(/\(5th ed\.\)/g, "").trim();
+    for (const [key, id] of pathToId.entries()) {
+      const keyNormalized = key.replace(/\(5th ed\.\)/g, "").trim();
+      if (
+        keyNormalized === normalizedPath ||
+        keyNormalized === originalPath.trim()
+      ) {
+        return id;
+      }
+    }
+    return undefined;
+  }
+
+  /**
    * Convert a v4 id-keyed structure back to a name-keyed tree.
    * Used when loading a v4 suggestedMerge file into the merge panel.
    *
@@ -1495,360 +1674,6 @@
       }
       conceptRegistry = newRegistry;
       console.log(`Loaded concept registry: ${newRegistry.size} concepts`);
-
-      // Check if we have a suggested merge to load
-      if (
-        data.suggestedMerge &&
-        (data.suggestedMerge.version === 4 ||
-          (data.suggestedMerge as any).mergedData)
-      ) {
-        console.log("Loading suggested merge...", data.suggestedMerge.metadata);
-        loadedFromSuggestion = true;
-        suggestionMetadata = data.suggestedMerge.metadata;
-        pendingReviews = data.suggestedMerge.pendingReview || [];
-        llmSuggestions = data.suggestedMerge.llmSuggestions || null;
-
-        // Load merged data (v4 converts id-keyed structure; v2 uses mergedData directly)
-        if (data.suggestedMerge.version === 4) {
-          const v4sm = data.suggestedMerge as SuggestedMergeV4;
-          // Merge v4 concept metadata into the registry (adds merged concepts)
-          for (const [id, meta] of Object.entries(v4sm.concepts)) {
-            conceptRegistry.set(id, meta);
-          }
-          conceptRegistry = new Map(conceptRegistry);
-          mergedData = forceLowercaseTerms(
-            v4StructureToNameTree(v4sm.structure, v4sm.concepts),
-          );
-        } else {
-          mergedData = forceLowercaseTerms(
-            structuredClone((data.suggestedMerge as SuggestedMerge).mergedData),
-          );
-        }
-
-        // Initialize merged path IDs
-        initializePathIds(mergedData, "", mergedPathToId);
-        mergedPathToId = new Map(mergedPathToId);
-
-        if (data.suggestedMerge.version === 4) {
-          // ── v4: translate ID-keyed lineage → name-keyed lineage ──────────────
-          const v4sm = data.suggestedMerge as SuggestedMergeV4;
-
-          // Build ID-path → name-path map from the v4 structure
-          const idToNamePath = buildV4IdToNamePath(
-            v4sm.structure,
-            v4sm.concepts,
-          );
-
-          // Build name → source-panel-path reverse maps for subscription lookup
-          const leftNameToPath = buildNameToSourcePath(leftPathToId);
-          const rightNameToPath = buildNameToSourcePath(rightPathToId);
-
-          // Translate the raw ID-keyed lineage to name-keyed LineageEntry map
-          const newLineage = translateV4Lineage(
-            v4sm.lineage ?? {},
-            idToNamePath,
-            v4sm.concepts,
-            leftNameToPath,
-            rightNameToPath,
-          );
-
-          // Fill in missing lineage entries for leaf array items (not emitted by
-          // the notebook's build_lineage since it only walks dict children)
-          function fillLineage(obj: unknown, basePath: string) {
-            if (obj && typeof obj === "object") {
-              if (Array.isArray(obj)) {
-                obj.forEach((item, idx) => {
-                  const childPath = `${basePath}/${idx}`;
-                  if (!newLineage.has(childPath)) {
-                    const parentLineage = newLineage.get(basePath);
-                    if (parentLineage) {
-                      newLineage.set(childPath, {
-                        sources: parentLineage.sources.map((s) => ({
-                          ...s,
-                          originalPath: `${s.originalPath}/${idx}`,
-                        })),
-                      });
-                    }
-                  }
-                  fillLineage(item, childPath);
-                });
-              } else {
-                Object.entries(obj as Record<string, unknown>).forEach(
-                  ([key, val]) => {
-                    const childPath = basePath ? `${basePath}/${key}` : key;
-                    if (!newLineage.has(childPath)) {
-                      const parentLineage = newLineage.get(basePath);
-                      if (parentLineage) {
-                        newLineage.set(childPath, {
-                          sources: parentLineage.sources.map((s) => ({
-                            ...s,
-                            originalPath: `${s.originalPath}/${key}`,
-                          })),
-                        });
-                      }
-                    }
-                    fillLineage(val, childPath);
-                  },
-                );
-              }
-            }
-          }
-          fillLineage(mergedData, "");
-          lineage = newLineage;
-
-          // Derive sourceMap from concept source metadata
-          // ('pathout' → 'left', 'who' → 'right', 'merged' → 'both')
-          const newSourceMap = new Map<string, string>();
-          for (const [idPath, namePath] of idToNamePath) {
-            const segments = idPath.split("/");
-            const lastId = segments[segments.length - 1];
-            // Skip leaf array indices (e.g. ".../0")
-            if (/^\d+$/.test(lastId)) continue;
-            const src = v4sm.concepts[lastId]?.source ?? "merged";
-            const side =
-              src === "pathout" ? "left" : src === "who" ? "right" : src === "created" ? "created" : "both";
-            newSourceMap.set(namePath, side);
-          }
-
-          // Fill in missing sourceMap entries for leaf array items.
-          // v4 sourceMap derivation above only emits object-key paths.
-          function fillSourceMapV4(
-            obj: unknown,
-            basePath: string,
-            parentSource: string | undefined,
-          ) {
-            if (obj && typeof obj === "object") {
-              if (Array.isArray(obj)) {
-                obj.forEach((item, idx) => {
-                  const childPath = `${basePath}/${idx}`;
-                  if (!newSourceMap.has(childPath) && parentSource) {
-                    newSourceMap.set(childPath, parentSource);
-                  }
-                  fillSourceMapV4(
-                    item,
-                    childPath,
-                    newSourceMap.get(childPath) || parentSource,
-                  );
-                });
-              } else {
-                Object.entries(obj as Record<string, unknown>).forEach(
-                  ([key, val]) => {
-                    const childPath = basePath ? `${basePath}/${key}` : key;
-                    if (!newSourceMap.has(childPath) && parentSource) {
-                      newSourceMap.set(childPath, parentSource);
-                    }
-                    fillSourceMapV4(
-                      val,
-                      childPath,
-                      newSourceMap.get(childPath) || parentSource,
-                    );
-                  },
-                );
-              }
-            }
-          }
-
-          fillSourceMapV4(mergedData, "", undefined);
-          sourceMap = newSourceMap;
-        } else {
-          // ── v2 / v1: generic name-keyed lineage loading ───────────────────────
-          if (data.suggestedMerge.lineage) {
-            const newLineage = new Map<string, LineageEntry>();
-            for (const [path, entry] of Object.entries(
-              data.suggestedMerge.lineage,
-            )) {
-              const typedEntry = entry as any;
-              newLineage.set(path, {
-                sources: (typedEntry.sources || []).map((s: any) => ({
-                  panel: s.panel,
-                  originalPath: s.originalPath,
-                  action: s.action,
-                })),
-              });
-            }
-
-            // Fill in missing lineage entries for leaf array items.
-            // The LLM-generated lineage only includes object key paths,
-            // not array element paths. Derive child lineage from parent.
-            function fillLineageV2(obj: unknown, basePath: string) {
-              if (obj && typeof obj === "object") {
-                if (Array.isArray(obj)) {
-                  obj.forEach((item, idx) => {
-                    const childPath = `${basePath}/${idx}`;
-                    if (!newLineage.has(childPath)) {
-                      const parentLineage = newLineage.get(basePath);
-                      if (parentLineage) {
-                        newLineage.set(childPath, {
-                          sources: parentLineage.sources.map((s) => ({
-                            ...s,
-                            originalPath: `${s.originalPath}/${idx}`,
-                          })),
-                        });
-                      }
-                    }
-                    fillLineageV2(item, childPath);
-                  });
-                } else {
-                  Object.entries(obj as Record<string, unknown>).forEach(
-                    ([key, val]) => {
-                      const childPath = basePath ? `${basePath}/${key}` : key;
-                      if (!newLineage.has(childPath)) {
-                        const parentLineage = newLineage.get(basePath);
-                        if (parentLineage) {
-                          newLineage.set(childPath, {
-                            sources: parentLineage.sources.map((s) => ({
-                              ...s,
-                              originalPath: `${s.originalPath}/${key}`,
-                            })),
-                          });
-                        }
-                      }
-                      fillLineageV2(val, childPath);
-                    },
-                  );
-                }
-              }
-            }
-            fillLineageV2(mergedData, "");
-            lineage = newLineage;
-          }
-
-          // Load source map if available
-          if ((data.suggestedMerge as any).sourceMap) {
-            const newSourceMap = new Map<string, string>();
-            for (const [path, source] of Object.entries(
-              (data.suggestedMerge as any).sourceMap as Record<string, string>,
-            )) {
-              newSourceMap.set(path, source);
-            }
-
-            // Fill in missing sourceMap entries for leaf array items.
-            function fillSourceMap(
-              obj: unknown,
-              basePath: string,
-              parentSource: string | undefined,
-            ) {
-              if (obj && typeof obj === "object") {
-                if (Array.isArray(obj)) {
-                  obj.forEach((item, idx) => {
-                    const childPath = `${basePath}/${idx}`;
-                    if (!newSourceMap.has(childPath) && parentSource) {
-                      newSourceMap.set(childPath, parentSource);
-                    }
-                    fillSourceMap(
-                      item,
-                      childPath,
-                      newSourceMap.get(childPath) || parentSource,
-                    );
-                  });
-                } else {
-                  Object.entries(obj as Record<string, unknown>).forEach(
-                    ([key, val]) => {
-                      const childPath = basePath ? `${basePath}/${key}` : key;
-                      if (!newSourceMap.has(childPath) && parentSource) {
-                        newSourceMap.set(childPath, parentSource);
-                      }
-                      fillSourceMap(
-                        val,
-                        childPath,
-                        newSourceMap.get(childPath) || parentSource,
-                      );
-                    },
-                  );
-                }
-              }
-            }
-            fillSourceMap(mergedData, "", undefined);
-            sourceMap = newSourceMap;
-          }
-        }
-
-        // Rebuild subscriptions and subscriberInfo from lineage
-        // This is needed to restore styling for source panels (bold/italic/normal)
-        const newSubscriptions = new Map<string, Set<string>>();
-        const newSubscriberInfo = new Map<
-          string,
-          { sourceId: string; source: "left" | "right"; isMerged: boolean }[]
-        >();
-
-        // Helper to find matching path with normalization
-        function findMatchingSourceId(
-          originalPath: string,
-          pathToId: Map<string, string>,
-        ): string | undefined {
-          // Exact match
-          let sourceId = pathToId.get(originalPath);
-          if (sourceId) return sourceId;
-
-          // Try with stripped whitespace
-          sourceId = pathToId.get(originalPath.trim());
-          if (sourceId) return sourceId;
-
-          // Look for keys that match after removing "(5th ed.)" suffix
-          const normalizedPath = originalPath
-            .replace(/\(5th ed\.\)/g, "")
-            .trim();
-          for (const [key, id] of pathToId.entries()) {
-            const keyNormalized = key.replace(/\(5th ed\.\)/g, "").trim();
-            if (
-              keyNormalized === normalizedPath ||
-              keyNormalized === originalPath.trim()
-            ) {
-              return id;
-            }
-          }
-
-          return undefined;
-        }
-
-        for (const [mergedPath, lineageEntry] of lineage.entries()) {
-          const subscriberId = mergedPathToId.get(mergedPath);
-          if (!subscriberId) continue;
-
-          // Check if this merged item has multiple sources (is a merge)
-          const leftRightSources = lineageEntry.sources.filter(
-            (s) => s.panel === "left" || s.panel === "right",
-          );
-          const isMerged = leftRightSources.length > 1;
-
-          for (const src of leftRightSources) {
-            const panel = src.panel as "left" | "right";
-            const pathToId = panel === "left" ? leftPathToId : rightPathToId;
-            const sourceId = findMatchingSourceId(src.originalPath, pathToId);
-
-            if (sourceId) {
-              // Add to subscriptions
-              if (!newSubscriptions.has(sourceId)) {
-                newSubscriptions.set(sourceId, new Set());
-              }
-              newSubscriptions.get(sourceId)!.add(subscriberId);
-
-              // Add to subscriberInfo
-              if (!newSubscriberInfo.has(subscriberId)) {
-                newSubscriberInfo.set(subscriberId, []);
-              }
-              newSubscriberInfo.get(subscriberId)!.push({
-                sourceId,
-                source: panel,
-                isMerged,
-              });
-            }
-          }
-        }
-
-        subscriptions = newSubscriptions;
-        subscriberInfo = newSubscriberInfo;
-
-        console.log(
-          `Loaded ${Object.keys(mergedData).length} top-level concepts from suggested merge (v${data.suggestedMerge.version})`,
-        );
-        console.log(
-          `Rebuilt subscriptions: ${subscriptions.size} sources, ${subscriberInfo.size} subscribers`,
-        );
-        if (pendingReviews.length > 0) {
-          console.log(`${pendingReviews.length} items need review`);
-        }
-      }
 
       initialized = true;
     }

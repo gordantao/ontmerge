@@ -62,19 +62,10 @@ export const load: PageLoad = async ({ fetch }) => {
   const left = v4StructureToNameTree(leftV4.structure, leftV4.concepts);
   const right = v4StructureToNameTree(rightV4.structure, rightV4.concepts);
 
-  let suggestedMerge = null;
-  try {
-    const res = await fetch('/data/suggested_merge.json');
-    if (res.ok) suggestedMerge = await res.json();
-  } catch {
-    // No suggested merge available
-  }
-
   return {
     left,
     right,
     leftRegistry: leftV4.concepts,
     rightRegistry: rightV4.concepts,
-    suggestedMerge,
   };
 };
