@@ -270,6 +270,155 @@
    * @param parentPath - The path to the parent array
    * @param deletedIndex - The index of the deleted item
    */
+  function reindexMergedArrayAfterDelete(
+    parentPath: string,
+    deletedIndex: number,
+    deletedPathKey: string,
+  ) {
+    const parentPrefix = parentPath ? parentPath + "/" : "";
+    const deletedPrefix = deletedPathKey + "/";
+
+    // Reindex sourceMap
+    const newSourceMap = new Map<string, string>();
+    for (const [key, value] of sourceMap.entries()) {
+      if (key === deletedPathKey || key.startsWith(deletedPrefix)) continue;
+      if (
+        key.startsWith(parentPrefix) ||
+        (!parentPrefix && /^\d/.test(key))
+      ) {
+        const rest = parentPrefix ? key.slice(parentPrefix.length) : key;
+        const slashIndex = rest.indexOf("/");
+        const indexPart = slashIndex === -1 ? rest : rest.slice(0, slashIndex);
+        const itemIndex = parseInt(indexPart, 10);
+        if (!isNaN(itemIndex) && itemIndex > deletedIndex) {
+          const newKey =
+            parentPrefix +
+            (itemIndex - 1) +
+            (slashIndex === -1 ? "" : rest.slice(slashIndex));
+          newSourceMap.set(newKey, value);
+        } else {
+          newSourceMap.set(key, value);
+        }
+      } else {
+        newSourceMap.set(key, value);
+      }
+    }
+    sourceMap = newSourceMap;
+
+    // Reindex mergedPathToId
+    const newMergedPathToId = new Map<string, string>();
+    for (const [key, id] of mergedPathToId.entries()) {
+      if (key === deletedPathKey || key.startsWith(deletedPrefix)) continue;
+      if (
+        key.startsWith(parentPrefix) ||
+        (!parentPrefix && /^\d/.test(key))
+      ) {
+        const rest = parentPrefix ? key.slice(parentPrefix.length) : key;
+        const slashIndex = rest.indexOf("/");
+        const indexPart = slashIndex === -1 ? rest : rest.slice(0, slashIndex);
+        const itemIndex = parseInt(indexPart, 10);
+        if (!isNaN(itemIndex) && itemIndex > deletedIndex) {
+          const newKey =
+            parentPrefix +
+            (itemIndex - 1) +
+            (slashIndex === -1 ? "" : rest.slice(slashIndex));
+          newMergedPathToId.set(newKey, id);
+        } else {
+          newMergedPathToId.set(key, id);
+        }
+      } else {
+        newMergedPathToId.set(key, id);
+      }
+    }
+    mergedPathToId = newMergedPathToId;
+
+    // Reindex lineage
+    reindexLineageAfterDelete(parentPath, deletedIndex);
+  }
+
+  function reindexMergedArrayAfterInsert(
+    parentPath: string,
+    insertedIndex: number,
+  ) {
+    const parentPrefix = parentPath ? parentPath + "/" : "";
+
+    // Reindex sourceMap: shift items at insertedIndex+ up by 1
+    const newSourceMap = new Map<string, string>();
+    for (const [key, value] of sourceMap.entries()) {
+      if (
+        key.startsWith(parentPrefix) ||
+        (!parentPrefix && /^\d/.test(key))
+      ) {
+        const rest = parentPrefix ? key.slice(parentPrefix.length) : key;
+        const slashIndex = rest.indexOf("/");
+        const indexPart = slashIndex === -1 ? rest : rest.slice(0, slashIndex);
+        const itemIndex = parseInt(indexPart, 10);
+        if (!isNaN(itemIndex) && itemIndex >= insertedIndex) {
+          const newKey =
+            parentPrefix +
+            (itemIndex + 1) +
+            (slashIndex === -1 ? "" : rest.slice(slashIndex));
+          newSourceMap.set(newKey, value);
+        } else {
+          newSourceMap.set(key, value);
+        }
+      } else {
+        newSourceMap.set(key, value);
+      }
+    }
+    sourceMap = newSourceMap;
+
+    // Reindex mergedPathToId
+    const newMergedPathToId = new Map<string, string>();
+    for (const [key, id] of mergedPathToId.entries()) {
+      if (
+        key.startsWith(parentPrefix) ||
+        (!parentPrefix && /^\d/.test(key))
+      ) {
+        const rest = parentPrefix ? key.slice(parentPrefix.length) : key;
+        const slashIndex = rest.indexOf("/");
+        const indexPart = slashIndex === -1 ? rest : rest.slice(0, slashIndex);
+        const itemIndex = parseInt(indexPart, 10);
+        if (!isNaN(itemIndex) && itemIndex >= insertedIndex) {
+          const newKey =
+            parentPrefix +
+            (itemIndex + 1) +
+            (slashIndex === -1 ? "" : rest.slice(slashIndex));
+          newMergedPathToId.set(newKey, id);
+        } else {
+          newMergedPathToId.set(key, id);
+        }
+      } else {
+        newMergedPathToId.set(key, id);
+      }
+    }
+    mergedPathToId = newMergedPathToId;
+
+    // Reindex lineage
+    const entries = Array.from(lineage.entries());
+    const newLineage = new Map<string, LineageEntry>();
+    for (const [path, entry] of entries) {
+      if (path.startsWith(parentPrefix)) {
+        const rest = path.slice(parentPrefix.length);
+        const slashIndex = rest.indexOf("/");
+        const indexPart = slashIndex === -1 ? rest : rest.slice(0, slashIndex);
+        const itemIndex = parseInt(indexPart, 10);
+        if (!isNaN(itemIndex) && itemIndex >= insertedIndex) {
+          const newKey =
+            parentPrefix +
+            (itemIndex + 1) +
+            (slashIndex === -1 ? "" : rest.slice(slashIndex));
+          newLineage.set(newKey, entry);
+        } else {
+          newLineage.set(path, entry);
+        }
+      } else {
+        newLineage.set(path, entry);
+      }
+    }
+    lineage = newLineage;
+  }
+
   function reindexLineageAfterDelete(parentPath: string, deletedIndex: number) {
     const parentPrefix = parentPath ? parentPath + "/" : "";
     // Get entries as array to avoid iterator issues with reactive proxies
@@ -1988,105 +2137,19 @@
         draggedPath.length === targetPath.length &&
         draggedPath.slice(0, -1).join("/") === targetPath.slice(0, -1).join("/")
       ) {
+        // Same array: reindex siblings and adjust target path
         const draggedIndex = parseInt(draggedPath[draggedPath.length - 1]);
         const targetIndex = parseInt(targetPath[targetPath.length - 1]);
         const parentPath = draggedPath.slice(0, -1).join("/");
         const parentPrefix = parentPath ? parentPath + "/" : "";
 
-        // Reindex all sourceMap entries after the deleted index
-        const newSourceMap = new Map<string, string>();
-        for (const [mapKey, value] of sourceMap.entries()) {
-          // Skip the deleted item and its children
-          if (
-            mapKey === draggedSourcePath ||
-            mapKey.startsWith(draggedSourcePath + "/")
-          ) {
-            continue;
-          }
+        reindexMergedArrayAfterDelete(
+          parentPath,
+          draggedIndex,
+          draggedSourcePath,
+        );
 
-          if (
-            mapKey.startsWith(parentPrefix) ||
-            (!parentPrefix && /^\d/.test(mapKey))
-          ) {
-            const rest = parentPrefix
-              ? mapKey.slice(parentPrefix.length)
-              : mapKey;
-            const slashIndex = rest.indexOf("/");
-            const indexPart =
-              slashIndex === -1 ? rest : rest.slice(0, slashIndex);
-            const itemIndex = parseInt(indexPart, 10);
-
-            if (
-              !isNaN(itemIndex) &&
-              !isNaN(draggedIndex) &&
-              itemIndex > draggedIndex
-            ) {
-              // Reindex this entry (shift down by 1)
-              const newIndex = itemIndex - 1;
-              const newKey =
-                parentPrefix +
-                newIndex +
-                (slashIndex === -1 ? "" : rest.slice(slashIndex));
-              newSourceMap.set(newKey, value);
-            } else {
-              newSourceMap.set(mapKey, value);
-            }
-          } else {
-            newSourceMap.set(mapKey, value);
-          }
-        }
-        sourceMap = newSourceMap;
-
-        // Reindex mergedPathToId entries after the deleted index to keep subscriber lookups aligned
-        const newMergedPathToId = new Map<string, string>();
-        for (const [mapKey, id] of mergedPathToId.entries()) {
-          // Skip the deleted item and its children
-          if (
-            mapKey === draggedSourcePath ||
-            mapKey.startsWith(draggedSourcePath + "/")
-          ) {
-            continue;
-          }
-
-          if (
-            mapKey.startsWith(parentPrefix) ||
-            (!parentPrefix && /^\d/.test(mapKey))
-          ) {
-            const rest = parentPrefix
-              ? mapKey.slice(parentPrefix.length)
-              : mapKey;
-            const slashIndex = rest.indexOf("/");
-            const indexPart =
-              slashIndex === -1 ? rest : rest.slice(0, slashIndex);
-            const itemIndex = parseInt(indexPart, 10);
-
-            if (
-              !isNaN(itemIndex) &&
-              !isNaN(draggedIndex) &&
-              itemIndex > draggedIndex
-            ) {
-              const newIndex = itemIndex - 1;
-              const newKey =
-                parentPrefix +
-                newIndex +
-                (slashIndex === -1 ? "" : rest.slice(slashIndex));
-              newMergedPathToId.set(newKey, id);
-            } else {
-              newMergedPathToId.set(mapKey, id);
-            }
-          } else {
-            newMergedPathToId.set(mapKey, id);
-          }
-        }
-        mergedPathToId = newMergedPathToId;
-
-        // Also reindex lineage for items in the same array
-        // First remove the dragged item's lineage
-        removeLineage(draggedSourcePath);
-        // Then reindex remaining items
-        reindexLineageAfterDelete(parentPath, draggedIndex);
-
-        // Adjust target path if needed
+        // Adjust target path if needed (target shifted down because dragged was before it)
         if (
           !isNaN(draggedIndex) &&
           !isNaN(targetIndex) &&
@@ -2102,7 +2165,7 @@
           );
         }
       } else if (sourcePanel === "merged") {
-        // Not same array, just delete the dragged item's sourceMap entry and lineage
+        // Cross-array or non-array item: clean up dragged item's entries
         sourceMap.delete(draggedSourcePath);
         removeLineage(draggedSourcePath);
 
@@ -2126,7 +2189,24 @@
             removeLineage(path);
           }
         }
-        mergedPathToId = new Map(mergedPathToId);
+
+        // If the dragged item was an array item, reindex its former siblings
+        if (isArrayItem) {
+          const draggedIndex = parseInt(
+            draggedPath[draggedPath.length - 1],
+            10,
+          );
+          if (!isNaN(draggedIndex)) {
+            const parentPath = draggedPath.slice(0, -1).join("/");
+            reindexMergedArrayAfterDelete(
+              parentPath,
+              draggedIndex,
+              draggedSourcePath,
+            );
+          }
+        } else {
+          mergedPathToId = new Map(mergedPathToId);
+        }
       }
 
       // Section merge: if the dragged item has children (object/array value),
@@ -2230,20 +2310,11 @@
           targetParent[targetKey] = converted;
           sectionMergeTargetValue = converted;
 
-          console.log("Array-to-object conversion:", {
-            targetItemPath,
-            arrayLength: targetValue.length,
-            arrayItems: targetValue.map(String),
-            convertedKeys: Object.keys(converted),
-            draggedKeys: Object.keys(value as Record<string, unknown>),
-          });
-
           // Remap old index-based sourceMap/subscription/lineage entries to key-based paths
           // since we converted the target from array to object
           for (let i = 0; i < targetValue.length; i++) {
             const oldPrefix = `${targetItemPath}/${i}`;
             const newPrefix = `${targetItemPath}/${String(targetValue[i])}`;
-            console.log(`Remap [${i}]: "${oldPrefix}" -> "${newPrefix}", sourceMap has old: ${sourceMap.has(oldPrefix)}, mergedPathToId has old: ${mergedPathToId.has(oldPrefix)}, lineage has old: ${lineage.has(oldPrefix)}`);
 
             // Remap exact match and any nested children
             for (const [path, src] of [...sourceMap.entries()]) {
@@ -2660,6 +2731,9 @@
           if (existingIndex !== -1) {
             // Duplicate found - use existing index for path
             addedPath = [...targetPath, String(existingIndex)];
+          } else if (insertBefore !== undefined) {
+            // Inserting at a specific position via splice
+            addedPath = [...targetPath, insertBefore];
           } else {
             // Will be added to the end
             addedPath = [...targetPath, String(targetContainer.length)];
@@ -3334,6 +3408,19 @@
         isSectionMerge,
       });
       addToData(targetData, targetPath, key, value, insertBefore, isArrayItem);
+
+      // Reindex after array insertion: when insertBefore is used, splice shifts existing items up
+      if (
+        targetPanel === "merged" &&
+        isArrayItem &&
+        insertBefore !== undefined
+      ) {
+        const insertedIndex = parseInt(insertBefore, 10);
+        if (!isNaN(insertedIndex)) {
+          const parentPath = targetPath.join("/");
+          reindexMergedArrayAfterInsert(parentPath, insertedIndex);
+        }
+      }
     }
 
     // Track source when dropping into merged panel
@@ -4083,74 +4170,7 @@
       if (isArrayItem && itemPath.length > 0) {
         const deletedIndex = parseInt(itemPath[itemPath.length - 1], 10);
         const parentPath = itemPath.slice(0, -1).join("/");
-        const parentPrefix = parentPath ? parentPath + "/" : "";
-
-        // Build a new sourceMap with reindexed entries
-        const newSourceMap = new Map<string, string>();
-        for (const [key, value] of sourceMap.entries()) {
-          // Skip the deleted item and its children
-          if (key === pathKey || key.startsWith(pathKey + "/")) {
-            continue;
-          }
-
-          if (key.startsWith(parentPrefix)) {
-            const rest = key.slice(parentPrefix.length);
-            const slashIndex = rest.indexOf("/");
-            const indexPart =
-              slashIndex === -1 ? rest : rest.slice(0, slashIndex);
-            const itemIndex = parseInt(indexPart, 10);
-
-            if (!isNaN(itemIndex) && itemIndex > deletedIndex) {
-              // Reindex this entry (shift down by 1)
-              const newIndex = itemIndex - 1;
-              const newKey =
-                parentPrefix +
-                newIndex +
-                (slashIndex === -1 ? "" : rest.slice(slashIndex));
-              newSourceMap.set(newKey, value);
-            } else {
-              // Keep as-is (index is lower or not a number)
-              newSourceMap.set(key, value);
-            }
-          } else {
-            // Not related to this parent, keep as-is
-            newSourceMap.set(key, value);
-          }
-        }
-        sourceMap = newSourceMap;
-
-        // Also reindex mergedPathToId
-        const newMergedPathToId = new Map<string, string>();
-        for (const [key, value] of mergedPathToId.entries()) {
-          if (key === pathKey || key.startsWith(pathKey + "/")) {
-            continue;
-          }
-
-          if (key.startsWith(parentPrefix)) {
-            const rest = key.slice(parentPrefix.length);
-            const slashIndex = rest.indexOf("/");
-            const indexPart =
-              slashIndex === -1 ? rest : rest.slice(0, slashIndex);
-            const itemIndex = parseInt(indexPart, 10);
-
-            if (!isNaN(itemIndex) && itemIndex > deletedIndex) {
-              const newIndex = itemIndex - 1;
-              const newKey =
-                parentPrefix +
-                newIndex +
-                (slashIndex === -1 ? "" : rest.slice(slashIndex));
-              newMergedPathToId.set(newKey, value);
-            } else {
-              newMergedPathToId.set(key, value);
-            }
-          } else {
-            newMergedPathToId.set(key, value);
-          }
-        }
-        mergedPathToId = newMergedPathToId;
-
-        // Also reindex lineage
-        reindexLineageAfterDelete(parentPath, deletedIndex);
+        reindexMergedArrayAfterDelete(parentPath, deletedIndex, pathKey);
       } else {
         // Not an array item, just remove this item and children
         const keysToDelete: string[] = [];
