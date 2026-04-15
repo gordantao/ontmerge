@@ -37,6 +37,8 @@
     onLineageHover = null,
     highlightedPath = null,
     sortMode = "alphabetical" as "alphabetical" | "status",
+    searchMatches = null as Set<string> | null,
+    searchAncestors = null as Set<string> | null,
   }: {
     data: unknown;
     name?: string | null;
@@ -69,6 +71,8 @@
     onLineageHover?: ((path: string[], isHovering: boolean) => void) | null;
     highlightedPath?: string | null;
     sortMode?: "alphabetical" | "status";
+    searchMatches?: Set<string> | null;
+    searchAncestors?: Set<string> | null;
   } = $props();
 
   let hoveredId: string | null = $state(null);
@@ -143,6 +147,27 @@
       pathKey === highlightedPath || pathKey.startsWith(highlightedPath + "/")
     );
   }
+
+  // Check if this item matches the current search query
+  function isSearchMatch(itemPath: string[]): boolean {
+    if (!searchMatches) return false;
+    return searchMatches.has(itemPath.join("/"));
+  }
+
+  // Auto-expand ancestors of search matches so results are visible
+  let prevSearchAncestors: Set<string> | null = null;
+  $effect(() => {
+    if (searchAncestors && searchAncestors.size > 0 && searchAncestors !== prevSearchAncestors) {
+      prevSearchAncestors = searchAncestors;
+      const newSet = new Set(expandedIds);
+      for (const a of searchAncestors) {
+        newSet.add(a);
+      }
+      expandedIds = newSet;
+    } else if ((!searchAncestors || searchAncestors.size === 0) && prevSearchAncestors) {
+      prevSearchAncestors = null;
+    }
+  });
 
   // Track if shift key is held
   let isShiftHeld = $state(false);
@@ -846,6 +871,8 @@
               : ''
             : ''} {isHighlighted(item.path)
             ? 'bg-yellow-200 dark:bg-yellow-900/50 ring-2 ring-yellow-400 ring-inset'
+            : ''} {isSearchMatch(item.path)
+            ? 'bg-green-100 dark:bg-green-900/40 ring-1 ring-green-400 ring-inset'
             : ''}"
           style="padding-left: {item.depth * 20}px;"
           ondragover={(e) => handleDragOver(e, item)}

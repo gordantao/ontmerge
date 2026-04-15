@@ -4,6 +4,7 @@
   import * as Card from "$lib/components/ui/card";
   import { File, GitMerge } from "lucide-svelte";
   import yaml from "js-yaml";
+  import { searchTree, defaultMatch } from "$lib/utils/search";
 
   // Concept metadata from v4 ontology format
   type ConceptMeta = {
@@ -112,6 +113,19 @@
 
   // Sort mode for source panels: "alphabetical" (default) or "status"
   let sourceSortMode = $state<"alphabetical" | "status">("alphabetical");
+
+  // Search state for source panels
+  let searchQuery = $state("");
+
+  let leftSearchResults = $derived.by(() => {
+    if (!searchQuery.trim()) return { matchPaths: null, ancestorPaths: null };
+    return searchTree(leftData, searchQuery.trim(), defaultMatch);
+  });
+
+  let rightSearchResults = $derived.by(() => {
+    if (!searchQuery.trim()) return { matchPaths: null, ancestorPaths: null };
+    return searchTree(rightData, searchQuery.trim(), defaultMatch);
+  });
 
   // Track if we loaded from a suggested merge
   let loadedFromSuggestion = $state(false);
@@ -4201,6 +4215,8 @@
       icon: File,
       getUsageMap: () => leftUsageMap,
       getHighlightedPath: () => highlightedLeftPath,
+      getSearchMatches: () => leftSearchResults.matchPaths,
+      getSearchAncestors: () => leftSearchResults.ancestorPaths,
       accentColor: "border-red-500",
       textColor: "text-red-600 dark:text-red-400",
     },
@@ -4212,6 +4228,8 @@
       icon: GitMerge,
       getUsageMap: () => null,
       getHighlightedPath: () => highlightedMergedPath,
+      getSearchMatches: () => null,
+      getSearchAncestors: () => null,
       accentColor: "border-purple-500",
       textColor: "text-purple-600 dark:text-purple-400",
     },
@@ -4223,6 +4241,8 @@
       icon: File,
       getUsageMap: () => rightUsageMap,
       getHighlightedPath: () => highlightedRightPath,
+      getSearchMatches: () => rightSearchResults.matchPaths,
+      getSearchAncestors: () => rightSearchResults.ancestorPaths,
       accentColor: "border-blue-500",
       textColor: "text-blue-600 dark:text-blue-400",
     },
@@ -4460,6 +4480,7 @@
     onExportV4={exportWithLineage}
     {sourceSortMode}
     onToggleSort={() => (sourceSortMode = sourceSortMode === "alphabetical" ? "status" : "alphabetical")}
+    bind:searchQuery
   />
 
   <div class="grid grid-cols-3 gap-4 flex-1 min-h-0 p-4 bg-background">
@@ -4502,6 +4523,8 @@
                   ? handleRightSourceHover
                   : null}
             sortMode={panel.id !== "merged" ? sourceSortMode : "alphabetical"}
+            searchMatches={panel.getSearchMatches()}
+            searchAncestors={panel.getSearchAncestors()}
           />
         </Card.Content>
       </Card.Root>

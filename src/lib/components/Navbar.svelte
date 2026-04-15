@@ -11,6 +11,7 @@
     ArrowUpDown,
     FileDown,
     CircleHelp,
+    Search,
     X,
   } from "lucide-svelte";
 
@@ -23,6 +24,7 @@
     onExportV4,
     sourceSortMode = "alphabetical" as "alphabetical" | "status",
     onToggleSort,
+    searchQuery = $bindable(""),
   }: {
     onUndo?: () => void;
     onRedo?: () => void;
@@ -32,9 +34,11 @@
     onExportV4?: () => void;
     sourceSortMode?: "alphabetical" | "status";
     onToggleSort?: () => void;
+    searchQuery?: string;
   } = $props();
 
   let showHelp = $state(false);
+  let searchInput: HTMLInputElement | undefined = $state();
 
   function openHelp() {
     showHelp = true;
@@ -47,6 +51,12 @@
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === "Escape" && showHelp) {
       closeHelp();
+    }
+    // Cmd/Ctrl+F focuses the search bar
+    if ((e.metaKey || e.ctrlKey) && e.key === "f") {
+      e.preventDefault();
+      searchInput?.focus();
+      searchInput?.select();
     }
   }
 </script>
@@ -136,6 +146,34 @@
       {/if}
     </div>
 
+    <div class="w-px h-5 bg-border mx-1"></div>
+
+    <div class="relative flex items-center">
+      <Search class="absolute left-2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+      <input
+        bind:this={searchInput}
+        type="text"
+        placeholder="Search source panels…"
+        bind:value={searchQuery}
+        onkeydown={(e) => {
+          if (e.key === "Escape") {
+            searchQuery = "";
+            searchInput?.blur();
+          }
+        }}
+        class="h-8 w-56 rounded-md border bg-background px-7 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+      />
+      {#if searchQuery}
+        <button
+          onclick={() => (searchQuery = "")}
+          class="absolute right-1.5 p-0.5 rounded hover:bg-accent transition-colors text-muted-foreground"
+          aria-label="Clear search"
+        >
+          <X class="h-3.5 w-3.5" />
+        </button>
+      {/if}
+    </div>
+
     <div class="flex-1"></div>
 
     <button
@@ -211,6 +249,10 @@
             <li><kbd class="kbd">x</kbd> — Expand all nodes in a tree</li>
             <li><kbd class="kbd">c</kbd> — Collapse all nodes in a tree</li>
             <li><kbd class="kbd">Shift</kbd> + hover — Show concept details</li>
+            <li>
+              <kbd class="kbd">⌘F</kbd> / <kbd class="kbd">Ctrl+F</kbd> — Search
+              source panels
+            </li>
           </ul>
         </div>
 
