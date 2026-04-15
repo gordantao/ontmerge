@@ -110,8 +110,8 @@
   // Maps stable concept IDs -> ConceptMeta for metadata lookup/display
   let conceptRegistry = $state<Map<string, ConceptMeta>>(new Map());
 
-  // Sort source panels by merge status
-  let sourceSortByStatus = $state(false);
+  // Sort mode for source panels: "alphabetical" (default) or "status"
+  let sourceSortMode = $state<"alphabetical" | "status">("alphabetical");
 
   // Track if we loaded from a suggested merge
   let loadedFromSuggestion = $state(false);
@@ -4458,8 +4458,8 @@
     {canRedo}
     onImportFile={handleImportFile}
     onExportV4={exportWithLineage}
-    {sourceSortByStatus}
-    onToggleSort={() => (sourceSortByStatus = !sourceSortByStatus)}
+    {sourceSortMode}
+    onToggleSort={() => (sourceSortMode = sourceSortMode === "alphabetical" ? "status" : "alphabetical")}
   />
 
   <div class="grid grid-cols-3 gap-4 flex-1 min-h-0 p-4 bg-background">
@@ -4501,7 +4501,7 @@
                 : panel.id === "right"
                   ? handleRightSourceHover
                   : null}
-            sortByStatus={panel.id !== "merged" && sourceSortByStatus}
+            sortMode={panel.id !== "merged" ? sourceSortMode : "alphabetical"}
           />
         </Card.Content>
       </Card.Root>

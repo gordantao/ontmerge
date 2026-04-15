@@ -36,7 +36,7 @@
     usageMap = null,
     onLineageHover = null,
     highlightedPath = null,
-    sortByStatus = false,
+    sortMode = "alphabetical" as "alphabetical" | "status",
   }: {
     data: unknown;
     name?: string | null;
@@ -68,7 +68,7 @@
     usageMap?: Map<string, string> | null;
     onLineageHover?: ((path: string[], isHovering: boolean) => void) | null;
     highlightedPath?: string | null;
-    sortByStatus?: boolean;
+    sortMode?: "alphabetical" | "status";
   } = $props();
 
   let hoveredId: string | null = $state(null);
@@ -310,11 +310,13 @@
 
     if (isObject(obj)) {
       let entries = Object.entries(obj);
-      if (sortByStatus && usageMap) {
+      if (sortMode === "status" && usageMap) {
         entries = entries
           .map((e) => ({ e, p: computeBestStatus(e[1], [...path, e[0]]) }))
           .sort((a, b) => a.p - b.p)
           .map((x) => x.e);
+      } else if (sortMode === "alphabetical") {
+        entries = entries.slice().sort((a, b) => a[0].localeCompare(b[0]));
       }
       entries.forEach(([key, value]) => {
         const currentPath = [...path, key];
@@ -346,10 +348,12 @@
       });
     } else if (Array.isArray(obj)) {
       let indices = obj.map((item, idx) => ({ item, idx }));
-      if (sortByStatus && usageMap) {
+      if (sortMode === "status" && usageMap) {
         indices = indices
           .map((x) => ({ ...x, p: computeBestStatus(x.item, [...path, String(x.idx)]) }))
           .sort((a, b) => a.p - b.p);
+      } else if (sortMode === "alphabetical") {
+        indices = indices.slice().sort((a, b) => String(a.item).localeCompare(String(b.item)));
       }
       indices.forEach(({ item, idx }) => {
         const key = String(idx);
