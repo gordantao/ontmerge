@@ -7,6 +7,7 @@
     Redo2,
     FileCode,
     FileUp,
+    ArrowDownAZ,
     ArrowUpDown,
     FileDown,
     CircleHelp,
@@ -20,7 +21,7 @@
     canRedo = false,
     onImportFile,
     onExportV4,
-    sourceSortByStatus = false,
+    sourceSortMode = "alphabetical" as "alphabetical" | "status",
     onToggleSort,
   }: {
     onUndo?: () => void;
@@ -29,7 +30,7 @@
     canRedo?: boolean;
     onImportFile?: (event: Event) => void;
     onExportV4?: () => void;
-    sourceSortByStatus?: boolean;
+    sourceSortMode?: "alphabetical" | "status";
     onToggleSort?: () => void;
   } = $props();
 
@@ -121,12 +122,16 @@
       {#if onToggleSort}
         <button
           onclick={onToggleSort}
-          class="p-1.5 rounded hover:bg-accent transition-colors {sourceSortByStatus
-            ? 'text-foreground'
-            : 'text-muted-foreground hover:text-foreground'}"
-          title="Sort source panels by merge status"
+          class="p-1.5 rounded hover:bg-accent transition-colors text-foreground"
+          title={sourceSortMode === "alphabetical"
+            ? "Sorted alphabetically — click to sort by merge status"
+            : "Sorted by merge status — click to sort alphabetically"}
         >
-          <ArrowUpDown class="h-4 w-4" />
+          {#if sourceSortMode === "alphabetical"}
+            <ArrowDownAZ class="h-4 w-4" />
+          {:else}
+            <ArrowUpDown class="h-4 w-4" />
+          {/if}
         </button>
       {/if}
     </div>
