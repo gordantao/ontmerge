@@ -652,16 +652,42 @@
       } | null = null;
 
       if (currentDropPosition === "inside" && targetItem.hasChildren) {
-        // Drop inside the target object/array
-        targetPath = targetItem.path;
-        // Check if this section is expanded (user can see children)
-        dropOnExpandedSection = expandedIds.has(targetItem.id);
-        console.log(
-          "Drop inside section (has children):",
-          targetItem.key,
-          "hasChildren:",
-          targetItem.hasChildren,
-        );
+        // Check if the dragged item is a sibling of the target (same parent path).
+        // If so, this is a section-level merge, not "add inside."
+        const dragSourcePath = dragData.sourcePath.slice(1); // Remove panel prefix
+        const dragParent = dragSourcePath.slice(0, -1).join("/");
+        const targetParent = targetItem.path.slice(0, -1).join("/");
+        const isSiblingDrop = dragData.sourcePath[0] === panelId && dragParent === targetParent;
+
+        if (isSiblingDrop) {
+          // Sibling section merge: treat like a leaf merge so +page.svelte
+          // merges the dragged section WITH this section instead of adding inside it.
+          targetPath = targetItem.path.slice(0, -1); // Parent path
+          mergeWithLeafItem = {
+            path: targetItem.path,
+            key: targetItem.key,
+            isArrayItem: targetItem.isArrayItem,
+          };
+          console.log(
+            "Drop onto sibling section (merging):",
+            targetItem.key,
+            "hasChildren:",
+            targetItem.hasChildren,
+            "mergeWithLeafItem:",
+            mergeWithLeafItem,
+          );
+        } else {
+          // Non-sibling drop: add inside the target section
+          targetPath = targetItem.path;
+          // Check if this section is expanded (user can see children)
+          dropOnExpandedSection = expandedIds.has(targetItem.id);
+          console.log(
+            "Drop inside section (has children):",
+            targetItem.key,
+            "hasChildren:",
+            targetItem.hasChildren,
+          );
+        }
       } else if (currentDropPosition === "inside" && !targetItem.hasChildren) {
         // Drop onto a leaf item - this is a merge operation
         // The target path is the parent, but we signal a merge with the target item

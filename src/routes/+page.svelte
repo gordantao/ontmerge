@@ -1701,6 +1701,7 @@
     value: unknown,
     isMerged: boolean = false,
     trackLineage: boolean = true, // Whether to track in lineage
+    mergedTree?: unknown, // When provided, use actual merged state for correct array index mapping
   ) {
     const pathToId = source === "left" ? leftPathToId : rightPathToId;
     const sourceId = pathToId.get(sourcePath);
@@ -1727,19 +1728,50 @@
     // unless they themselves are individually merged (which would happen in a separate call)
     if (value && typeof value === "object") {
       if (Array.isArray(value)) {
-        value.forEach((item, idx) => {
-          subscribeItemAndChildren(
-            `${mergedPath}/${idx}`,
-            `${sourcePath}/${idx}`,
-            source,
-            item,
-            false, // Children are NOT merged just because parent is
-            trackLineage,
-          );
-        });
+        if (mergedTree && Array.isArray(mergedTree)) {
+          // Merge-aware: map each source item to its actual index in the merged array.
+          // After addToData dedup/concat, dragged index N may not correspond to merged index N.
+          value.forEach((item, srcIdx) => {
+            const mergedIdx = (mergedTree as unknown[]).findIndex(
+              (ex) =>
+                typeof ex === typeof item && String(ex) === String(item),
+            );
+            if (mergedIdx !== -1) {
+              const itemIsMerged =
+                sourceMap.get(`${mergedPath}/${mergedIdx}`) === "both";
+              subscribeItemAndChildren(
+                `${mergedPath}/${mergedIdx}`,
+                `${sourcePath}/${srcIdx}`,
+                source,
+                item,
+                itemIsMerged,
+                trackLineage,
+                (mergedTree as unknown[])[mergedIdx],
+              );
+            }
+          });
+        } else {
+          // Original behavior: indices match 1:1
+          value.forEach((item, idx) => {
+            subscribeItemAndChildren(
+              `${mergedPath}/${idx}`,
+              `${sourcePath}/${idx}`,
+              source,
+              item,
+              false, // Children are NOT merged just because parent is
+              trackLineage,
+            );
+          });
+        }
       } else {
         Object.entries(value as Record<string, unknown>).forEach(
           ([key, val]) => {
+            const mergedChild =
+              mergedTree &&
+              typeof mergedTree === "object" &&
+              !Array.isArray(mergedTree)
+                ? (mergedTree as Record<string, unknown>)[key]
+                : undefined;
             subscribeItemAndChildren(
               `${mergedPath}/${key}`,
               `${sourcePath}/${key}`,
@@ -1747,6 +1779,7 @@
               val,
               false, // Children are NOT merged just because parent is
               trackLineage,
+              mergedChild,
             );
           },
         );
@@ -2053,7 +2086,91 @@
         if (draggedSubscriberIdForLeafMerge) {
           unsubscribe(draggedSubscriberIdForLeafMerge);
           mergedPathToId.delete(draggedSourcePath);
-          mergedPathToId = new Map(mergedPathToId);
+        }
+
+        // Also clean up children's stale entries (for section merges)
+        const draggedPrefix = draggedSourcePath + "/";
+        for (const [path] of [...sourceMap.entries()]) {
+          if (path.startsWith(draggedPrefix)) {
+            sourceMap.delete(path);
+          }
+        }
+        for (const [path, subId] of [...mergedPathToId.entries()]) {
+          if (path.startsWith(draggedPrefix)) {
+            unsubscribe(subId);
+            mergedPathToId.delete(path);
+            removeLineage(path);
+          }
+        }
+        mergedPathToId = new Map(mergedPathToId);
+      }
+
+      // Section merge: if the dragged item has children (object/array value),
+      // merge its children into the target section before updating metadata.
+      // This handles sibling section merges (e.g., merging "Myeloma" into "Leukemia").
+      let sectionMergeTargetValue: unknown = undefined;
+      if (value && typeof value === "object") {
+        // Navigate to the target item in merged data
+        let targetParent: any = mergedData;
+        const targetSegments = mergeWithLeafItem.path;
+        for (let i = 0; i < targetSegments.length - 1; i++) {
+          if (
+            targetParent &&
+            targetParent[targetSegments[i]] !== undefined
+          ) {
+            targetParent = targetParent[targetSegments[i]];
+          }
+        }
+        const targetKey = targetSegments[targetSegments.length - 1];
+        const targetValue = targetParent[targetKey];
+
+        if (Array.isArray(targetValue) && Array.isArray(value)) {
+          // Array-array merge: add non-duplicate items from dragged into target
+          for (const item of value as unknown[]) {
+            const isDuplicate = targetValue.some(
+              (ex: unknown) =>
+                typeof ex === typeof item && String(ex) === String(item),
+            );
+            if (!isDuplicate) {
+              targetValue.push(item);
+            }
+          }
+          sectionMergeTargetValue = targetValue;
+        } else if (
+          typeof targetValue === "object" &&
+          targetValue !== null &&
+          !Array.isArray(targetValue) &&
+          typeof value === "object" &&
+          !Array.isArray(value)
+        ) {
+          // Object-object merge: add keys from dragged, merge matching arrays
+          for (const [k, v] of Object.entries(
+            value as Record<string, unknown>,
+          )) {
+            if (!(k in (targetValue as Record<string, unknown>))) {
+              (targetValue as Record<string, unknown>)[k] = v;
+            } else if (
+              Array.isArray(
+                (targetValue as Record<string, unknown>)[k],
+              ) &&
+              Array.isArray(v)
+            ) {
+              const arr = (targetValue as Record<string, unknown>)[
+                k
+              ] as unknown[];
+              for (const item of v as unknown[]) {
+                const isDuplicate = arr.some(
+                  (ex: unknown) =>
+                    typeof ex === typeof item &&
+                    String(ex) === String(item),
+                );
+                if (!isDuplicate) {
+                  arr.push(item);
+                }
+              }
+            }
+          }
+          sectionMergeTargetValue = targetValue;
         }
       }
 
@@ -2111,6 +2228,22 @@
       console.log("Setting sourceMap for", targetItemPath, "to", mergedSource);
       console.log("sourceMap before update:", [...sourceMap.entries()]);
       sourceMap.set(targetItemPath, mergedSource);
+
+      // For section merges, also set sourceMap for the dragged item's children
+      // using merge-aware index mapping (handles dedup/concat correctly)
+      if (sectionMergeTargetValue !== undefined) {
+        recordSource(
+          targetItemPath,
+          value,
+          draggedSource === "left" ||
+            draggedSource === "right" ||
+            draggedSource === "both"
+            ? draggedSource
+            : "both",
+          sectionMergeTargetValue,
+        );
+      }
+
       sourceMap = new Map(sourceMap);
       console.log("sourceMap after update:", [...sourceMap.entries()]);
 
@@ -2157,6 +2290,8 @@
           sourcePanel as "left" | "right",
           value,
           isMerged,
+          true, // trackLineage
+          sectionMergeTargetValue, // merged tree for correct array index mapping in section merges
         );
 
         console.log(
@@ -2669,9 +2804,11 @@
                       "as:",
                       childSource,
                     );
-                    recordSource(childPath, value, childSource);
+                    // Pass merged tree so array indices map correctly after dedup/concat
+                    recordSource(childPath, value, childSource, targetObj[key]);
                   } else {
                     // For object value, record source for each child
+                    // Pass the merged child so array indices map correctly
                     const draggedChildren = value as Record<string, unknown>;
                     for (const [childKey, childValue] of Object.entries(
                       draggedChildren,
@@ -2683,7 +2820,12 @@
                         "as:",
                         childSource,
                       );
-                      recordSource(childPath, childValue, childSource);
+                      recordSource(
+                        childPath,
+                        childValue,
+                        childSource,
+                        targetObj[childKey],
+                      );
                     }
                   }
                 }
@@ -2728,6 +2870,10 @@
                     mergedPathToId = new Map(mergedPathToId);
                   }
 
+                  // Pass merged tree so array indices map correctly after dedup/concat
+                  const mergedAtSubscriptionPath = Array.isArray(value)
+                    ? targetObj[key]
+                    : targetObj;
                   console.log(
                     "Section merge - subscribing dragged:",
                     draggedOriginalPath,
@@ -2744,6 +2890,8 @@
                     draggedSource,
                     value,
                     isMerged,
+                    true, // trackLineage
+                    mergedAtSubscriptionPath,
                   );
                 }
 
@@ -3106,7 +3254,25 @@
       ) {
         if (isSectionMerge) {
           // For section merges, mark parent as "both" but keep children's original source
-          recordSourceForMergedSection(itemPath, value, sourceToRecord);
+          // Navigate to the merged data at itemPath to pass as mergedTree
+          let mergedAtItemPath: unknown = targetData;
+          for (const seg of addedPath) {
+            if (
+              mergedAtItemPath &&
+              typeof mergedAtItemPath === "object" &&
+              (mergedAtItemPath as Record<string, unknown>)[seg] !== undefined
+            ) {
+              mergedAtItemPath = (mergedAtItemPath as Record<string, unknown>)[
+                seg
+              ];
+            }
+          }
+          recordSourceForMergedSection(
+            itemPath,
+            value,
+            sourceToRecord,
+            mergedAtItemPath,
+          );
         } else {
           recordSource(itemPath, value, sourceToRecord);
         }
@@ -3229,7 +3395,12 @@
    * @param value - Value/subtree to recursively process
    * @param source - Source panel ("left", "right", or "both")
    */
-  function recordSource(basePath: string, value: unknown, source: string) {
+  function recordSource(
+    basePath: string,
+    value: unknown,
+    source: string,
+    mergedTree?: unknown, // When provided, use actual merged state for correct array index mapping
+  ) {
     // Check if this path already has a different source - if so, merge to "both"
     const existingSource = sourceMap.get(basePath);
     let newSource = source;
@@ -3247,13 +3418,39 @@
     // Recursively record children
     if (value && typeof value === "object") {
       if (Array.isArray(value)) {
-        value.forEach((item, idx) => {
-          recordSource(`${basePath}/${idx}`, item, source);
-        });
+        if (mergedTree && Array.isArray(mergedTree)) {
+          // Merge-aware: map each source item to its actual index in the merged array.
+          // After addToData dedup/concat, dragged index N may not correspond to merged index N.
+          value.forEach((item) => {
+            const mergedIdx = (mergedTree as unknown[]).findIndex(
+              (ex) =>
+                typeof ex === typeof item && String(ex) === String(item),
+            );
+            if (mergedIdx !== -1) {
+              recordSource(
+                `${basePath}/${mergedIdx}`,
+                item,
+                source,
+                (mergedTree as unknown[])[mergedIdx],
+              );
+            }
+          });
+        } else {
+          // Original behavior: indices match 1:1
+          value.forEach((item, idx) => {
+            recordSource(`${basePath}/${idx}`, item, source);
+          });
+        }
       } else {
         Object.entries(value as Record<string, unknown>).forEach(
           ([key, val]) => {
-            recordSource(`${basePath}/${key}`, val, source);
+            const mergedChild =
+              mergedTree &&
+              typeof mergedTree === "object" &&
+              !Array.isArray(mergedTree)
+                ? (mergedTree as Record<string, unknown>)[key]
+                : undefined;
+            recordSource(`${basePath}/${key}`, val, source, mergedChild);
           },
         );
       }
@@ -3273,6 +3470,7 @@
     basePath: string,
     value: unknown,
     source: string,
+    mergedTree?: unknown, // When provided, use actual merged state for correct array index mapping
   ) {
     // For merged sections: mark the parent as "both" but children keep their original source
     // This is used when dropping a red section onto a blue section (or vice versa)
@@ -3284,31 +3482,64 @@
     // Only record children that don't already have a source (new items from the incoming section)
     if (value && typeof value === "object") {
       if (Array.isArray(value)) {
-        value.forEach((item, idx) => {
-          const childPath = `${basePath}/${idx}`;
-          // Only set source for items that don't already have one
-          if (!sourceMap.has(childPath)) {
-            recordSource(childPath, item, source);
-          }
-          // If it already exists with a different source, merge to "both" for duplicates
-          else {
-            const existingSource = sourceMap.get(childPath);
-            if (
-              existingSource &&
-              existingSource !== source &&
-              existingSource !== "both"
-            ) {
-              sourceMap.set(childPath, "both");
+        if (mergedTree && Array.isArray(mergedTree)) {
+          // Merge-aware: map each source item to its actual index in the merged array
+          value.forEach((item) => {
+            const mergedIdx = (mergedTree as unknown[]).findIndex(
+              (ex) =>
+                typeof ex === typeof item && String(ex) === String(item),
+            );
+            if (mergedIdx === -1) return;
+            const childPath = `${basePath}/${mergedIdx}`;
+            if (!sourceMap.has(childPath)) {
+              recordSource(
+                childPath,
+                item,
+                source,
+                (mergedTree as unknown[])[mergedIdx],
+              );
+            } else {
+              const existingSource = sourceMap.get(childPath);
+              if (
+                existingSource &&
+                existingSource !== source &&
+                existingSource !== "both"
+              ) {
+                sourceMap.set(childPath, "both");
+              }
             }
-          }
-        });
+          });
+        } else {
+          // Original behavior: indices match 1:1
+          value.forEach((item, idx) => {
+            const childPath = `${basePath}/${idx}`;
+            if (!sourceMap.has(childPath)) {
+              recordSource(childPath, item, source);
+            } else {
+              const existingSource = sourceMap.get(childPath);
+              if (
+                existingSource &&
+                existingSource !== source &&
+                existingSource !== "both"
+              ) {
+                sourceMap.set(childPath, "both");
+              }
+            }
+          });
+        }
       } else {
         Object.entries(value as Record<string, unknown>).forEach(
           ([key, val]) => {
             const childPath = `${basePath}/${key}`;
+            const mergedChild =
+              mergedTree &&
+              typeof mergedTree === "object" &&
+              !Array.isArray(mergedTree)
+                ? (mergedTree as Record<string, unknown>)[key]
+                : undefined;
             // Only set source for items that don't already have one
             if (!sourceMap.has(childPath)) {
-              recordSource(childPath, val, source);
+              recordSource(childPath, val, source, mergedChild);
             }
             // If it already exists with a different source, it's a sub-section merge
             else {
@@ -3319,7 +3550,12 @@
                 existingSource !== "both"
               ) {
                 // Recursively handle as a merged section
-                recordSourceForMergedSection(childPath, val, source);
+                recordSourceForMergedSection(
+                  childPath,
+                  val,
+                  source,
+                  mergedChild,
+                );
               }
             }
           },
