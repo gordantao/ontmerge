@@ -1750,6 +1750,30 @@
               );
             }
           });
+        } else if (
+          mergedTree &&
+          typeof mergedTree === "object" &&
+          !Array.isArray(mergedTree)
+        ) {
+          // Array value merged into object target: map each array item to its key in the merged object
+          value.forEach((item, srcIdx) => {
+            const itemKey = String(item);
+            if (
+              itemKey in (mergedTree as Record<string, unknown>)
+            ) {
+              const itemIsMerged =
+                sourceMap.get(`${mergedPath}/${itemKey}`) === "both";
+              subscribeItemAndChildren(
+                `${mergedPath}/${itemKey}`,
+                `${sourcePath}/${srcIdx}`,
+                source,
+                item,
+                itemIsMerged,
+                trackLineage,
+                (mergedTree as Record<string, unknown>)[itemKey],
+              );
+            }
+          });
         } else {
           // Original behavior: indices match 1:1
           value.forEach((item, idx) => {
@@ -2168,6 +2192,90 @@
                   arr.push(item);
                 }
               }
+            }
+          }
+          sectionMergeTargetValue = targetValue;
+        } else if (
+          Array.isArray(targetValue) &&
+          typeof value === "object" &&
+          !Array.isArray(value)
+        ) {
+          // Array target + Object dragged: convert target array to object, then merge dragged keys
+          const converted: Record<string, unknown> = {};
+          for (const item of targetValue) {
+            converted[String(item)] = null;
+          }
+          for (const [k, v] of Object.entries(
+            value as Record<string, unknown>,
+          )) {
+            if (!(k in converted)) {
+              converted[k] = v;
+            } else if (
+              Array.isArray(converted[k]) &&
+              Array.isArray(v)
+            ) {
+              const arr = converted[k] as unknown[];
+              for (const item of v as unknown[]) {
+                const isDuplicate = arr.some(
+                  (ex: unknown) =>
+                    typeof ex === typeof item &&
+                    String(ex) === String(item),
+                );
+                if (!isDuplicate) {
+                  arr.push(item);
+                }
+              }
+            }
+          }
+          targetParent[targetKey] = converted;
+          sectionMergeTargetValue = converted;
+
+          console.log("Array-to-object conversion:", {
+            targetItemPath,
+            arrayLength: targetValue.length,
+            arrayItems: targetValue.map(String),
+            convertedKeys: Object.keys(converted),
+            draggedKeys: Object.keys(value as Record<string, unknown>),
+          });
+
+          // Remap old index-based sourceMap/subscription/lineage entries to key-based paths
+          // since we converted the target from array to object
+          for (let i = 0; i < targetValue.length; i++) {
+            const oldPrefix = `${targetItemPath}/${i}`;
+            const newPrefix = `${targetItemPath}/${String(targetValue[i])}`;
+            console.log(`Remap [${i}]: "${oldPrefix}" -> "${newPrefix}", sourceMap has old: ${sourceMap.has(oldPrefix)}, mergedPathToId has old: ${mergedPathToId.has(oldPrefix)}, lineage has old: ${lineage.has(oldPrefix)}`);
+
+            // Remap exact match and any nested children
+            for (const [path, src] of [...sourceMap.entries()]) {
+              if (path === oldPrefix || path.startsWith(oldPrefix + "/")) {
+                sourceMap.delete(path);
+                sourceMap.set(path.replace(oldPrefix, newPrefix), src);
+              }
+            }
+            for (const [path, subId] of [...mergedPathToId.entries()]) {
+              if (path === oldPrefix || path.startsWith(oldPrefix + "/")) {
+                mergedPathToId.delete(path);
+                mergedPathToId.set(path.replace(oldPrefix, newPrefix), subId);
+              }
+            }
+            for (const [path, lin] of [...lineage.entries()]) {
+              if (path === oldPrefix || path.startsWith(oldPrefix + "/")) {
+                lineage.delete(path);
+                lineage.set(path.replace(oldPrefix, newPrefix), lin);
+              }
+            }
+          }
+        } else if (
+          typeof targetValue === "object" &&
+          targetValue !== null &&
+          !Array.isArray(targetValue) &&
+          Array.isArray(value)
+        ) {
+          // Object target + Array dragged: add array items as leaf keys in target object
+          for (const item of value as unknown[]) {
+            const itemKey = String(item);
+            if (!(itemKey in (targetValue as Record<string, unknown>))) {
+              (targetValue as Record<string, unknown>)[itemKey] = null;
             }
           }
           sectionMergeTargetValue = targetValue;
@@ -3432,6 +3540,25 @@
                 item,
                 source,
                 (mergedTree as unknown[])[mergedIdx],
+              );
+            }
+          });
+        } else if (
+          mergedTree &&
+          typeof mergedTree === "object" &&
+          !Array.isArray(mergedTree)
+        ) {
+          // Array value merged into object target: map each array item to its key in the merged object
+          value.forEach((item) => {
+            const itemKey = String(item);
+            if (
+              itemKey in (mergedTree as Record<string, unknown>)
+            ) {
+              recordSource(
+                `${basePath}/${itemKey}`,
+                item,
+                source,
+                (mergedTree as Record<string, unknown>)[itemKey],
               );
             }
           });
