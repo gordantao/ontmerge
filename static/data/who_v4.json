@@ -25416,7 +25416,7 @@
       "source": "who"
     },
     "<WHO-1768>": {
-      "name": "Chapter 10: Haematolymphoid proliferations and neoplasia",
+      "name": "Haematolymphoid proliferations and neoplasia",
       "synonyms": [],
       "icd_codes": [],
       "primary_reference": "https://tumourclassification.iarc.who.int/chaptercontent/52/231",
@@ -25850,7 +25850,7 @@
       "source": "who"
     },
     "<WHO-1797>": {
-      "name": "Chapter 11: Melanocytic tumours",
+      "name": "Melanocytic tumours",
       "synonyms": [],
       "icd_codes": [],
       "primary_reference": "https://tumourclassification.iarc.who.int/chaptercontent/52/259",
@@ -25875,7 +25875,7 @@
       "source": "who"
     },
     "<WHO-1799>": {
-      "name": "Chapter 12: Tumours and tumour-like lesions of the neck and lymph nodes",
+      "name": "Tumours and tumour-like lesions of the neck and lymph nodes",
       "synonyms": [],
       "icd_codes": [],
       "primary_reference": "https://tumourclassification.iarc.who.int/chaptercontent/52/263",
@@ -26023,7 +26023,7 @@
       "source": "who"
     },
     "<WHO-1810>": {
-      "name": "Chapter 13: Germ cell tumours",
+      "name": "Germ cell tumours",
       "synonyms": [],
       "icd_codes": [],
       "primary_reference": "https://tumourclassification.iarc.who.int/chaptercontent/52/274",
@@ -26053,7 +26053,7 @@
       "source": "who"
     },
     "<WHO-1812>": {
-      "name": "Chapter 14: Metastasis",
+      "name": "Metastasis",
       "synonyms": [],
       "icd_codes": [],
       "primary_reference": "https://tumourclassification.iarc.who.int/chaptercontent/52/366",
@@ -26074,7 +26074,7 @@
       "source": "who"
     },
     "<WHO-1814>": {
-      "name": "Chapter 15: Neuroendocrine neoplasms and paraganglioma",
+      "name": "Neuroendocrine neoplasms and paraganglioma",
       "synonyms": [],
       "icd_codes": [],
       "primary_reference": "https://tumourclassification.iarc.who.int/chaptercontent/52/343",
@@ -26232,7 +26232,7 @@
       "source": "who"
     },
     "<WHO-1825>": {
-      "name": "Chapter 16: Genetic tumour syndromes involving the head and neck",
+      "name": "Genetic tumour syndromes involving the head and neck",
       "synonyms": [],
       "icd_codes": [],
       "primary_reference": "https://tumourclassification.iarc.who.int/chaptercontent/52/289",
@@ -26498,7 +26498,7 @@
       "source": "who"
     },
     "<WHO-1841>": {
-      "name": "Chapter 1: Nasal, paranasal, and skull base tumours",
+      "name": "Nasal, paranasal, and skull base tumours",
       "synonyms": [],
       "icd_codes": [],
       "primary_reference": "https://tumourclassification.iarc.who.int/chapters/52",
@@ -26952,7 +26952,7 @@
       "source": "who"
     },
     "<WHO-1873>": {
-      "name": "Chapter 2: Nasopharyngeal tumours",
+      "name": "Nasopharyngeal tumours",
       "synonyms": [],
       "icd_codes": [],
       "primary_reference": "https://tumourclassification.iarc.who.int/chaptercontent/52/262",
@@ -27038,7 +27038,7 @@
       "source": "who"
     },
     "<WHO-1880>": {
-      "name": "Chapter 3: Hypopharyngeal, laryngeal, tracheal, and parapharyngeal tumours",
+      "name": "Hypopharyngeal, laryngeal, tracheal, and parapharyngeal tumours",
       "synonyms": [],
       "icd_codes": [],
       "primary_reference": "https://tumourclassification.iarc.who.int/chaptercontent/52/37",
@@ -27249,7 +27249,7 @@
       "source": "who"
     },
     "<WHO-1894>": {
-      "name": "Chapter 4: Salivary gland tumours",
+      "name": "Salivary gland tumours",
       "synonyms": [],
       "icd_codes": [],
       "primary_reference": "https://tumourclassification.iarc.who.int/chaptercontent/52/323",
@@ -27970,7 +27970,7 @@
       "source": "who"
     },
     "<WHO-1938>": {
-      "name": "Chapter 5: Oral cavity and mobile tongue tumours",
+      "name": "Oral cavity and mobile tongue tumours",
       "synonyms": [],
       "icd_codes": [],
       "primary_reference": "https://tumourclassification.iarc.who.int/chaptercontent/52/72",
@@ -28275,7 +28275,7 @@
       "source": "who"
     },
     "<WHO-1961>": {
-      "name": "Chapter 6: Oropharyngeal tumours",
+      "name": "Oropharyngeal tumours",
       "synonyms": [],
       "icd_codes": [],
       "primary_reference": "https://tumourclassification.iarc.who.int/chaptercontent/52/169",
@@ -28365,7 +28365,7 @@
       "source": "who"
     },
     "<WHO-1968>": {
-      "name": "Chapter 7: Odontogenic and maxillofacial bone tumours",
+      "name": "Odontogenic and maxillofacial bone tumours",
       "synonyms": [],
       "icd_codes": [],
       "primary_reference": "https://tumourclassification.iarc.who.int/chaptercontent/52/119",
@@ -29367,7 +29367,7 @@
       "source": "who"
     },
     "<WHO-2035>": {
-      "name": "Chapter 8: Ear tumours",
+      "name": "Ear tumours",
       "synonyms": [],
       "icd_codes": [],
       "primary_reference": "https://tumourclassification.iarc.who.int/chaptercontent/52/134",
@@ -29624,7 +29624,7 @@
       "source": "who"
     },
     "<WHO-2052>": {
-      "name": "Chapter 9: Soft tissue tumours",
+      "name": "Soft tissue tumours",
       "synonyms": [],
       "icd_codes": [],
       "primary_reference": "https://tumourclassification.iarc.who.int/chaptercontent/52/300",
@@ -30286,7 +30286,7 @@
       "source": "who"
     },
     "<WHO-2096>": {
-      "name": "Chapter 10: Breast tumours",
+      "name": "Breast tumours",
       "synonyms": [],
       "icd_codes": [],
       "primary_reference": "https://tumourclassification.iarc.who.int/chaptercontent/44/274",
@@ -30349,7 +30349,7 @@
       "source": "who"
     },
     "<WHO-2101>": {
-      "name": "Chapter 11: Digestive system tumours",
+      "name": "Digestive system tumours",
       "synonyms": [],
       "icd_codes": [],
       "primary_reference": "https://tumourclassification.iarc.who.int/chaptercontent/44/428",
@@ -30658,7 +30658,7 @@
       "source": "who"
     },
     "<WHO-2123>": {
-      "name": "Chapter 12: Endocrine tumours",
+      "name": "Endocrine tumours",
       "synonyms": [],
       "icd_codes": [],
       "primary_reference": "https://tumourclassification.iarc.who.int/chaptercontent/44/304",
@@ -30953,7 +30953,7 @@
       "source": "who"
     },
     "<WHO-2145>": {
-      "name": "Chapter 13: Head and neck tumours",
+      "name": "Head and neck tumours",
       "synonyms": [],
       "icd_codes": [],
       "primary_reference": "https://tumourclassification.iarc.who.int/chaptercontent/44/329",
@@ -31254,7 +31254,7 @@
       "source": "who"
     },
     "<WHO-2165>": {
-      "name": "Chapter 14: Thoracic tumours",
+      "name": "Thoracic tumours",
       "synonyms": [],
       "icd_codes": [],
       "primary_reference": "https://tumourclassification.iarc.who.int/chaptercontent/44/350",
@@ -31344,7 +31344,7 @@
       "source": "who"
     },
     "<WHO-2172>": {
-      "name": "Chapter 15: Skin tumours",
+      "name": "Skin tumours",
       "synonyms": [],
       "icd_codes": [],
       "primary_reference": "https://tumourclassification.iarc.who.int/chaptercontent/44/357",
@@ -31583,7 +31583,7 @@
       "source": "who"
     },
     "<WHO-2189>": {
-      "name": "Chapter 16: Genetic tumour syndromes",
+      "name": "Genetic tumour syndromes",
       "synonyms": [],
       "icd_codes": [],
       "primary_reference": "https://tumourclassification.iarc.who.int/chaptercontent/44/375",
@@ -31923,7 +31923,7 @@
       "source": "who"
     },
     "<WHO-2213>": {
-      "name": "Chapter 2: Haematolymphoid disorders",
+      "name": "Haematolymphoid disorders",
       "synonyms": [],
       "icd_codes": [],
       "primary_reference": "https://tumourclassification.iarc.who.int/chapters/44",
@@ -32736,7 +32736,7 @@
       "source": "who"
     },
     "<WHO-2269>": {
-      "name": "Chapter 3: CNS tumours",
+      "name": "CNS tumours",
       "synonyms": [],
       "icd_codes": [],
       "primary_reference": "https://tumourclassification.iarc.who.int/chaptercontent/44/408",
@@ -33676,7 +33676,7 @@
       "source": "who"
     },
     "<WHO-2334>": {
-      "name": "Chapter 4: Peripheral neuroblastic tumours",
+      "name": "Peripheral neuroblastic tumours",
       "synonyms": [],
       "icd_codes": [],
       "primary_reference": "https://tumourclassification.iarc.who.int/chaptercontent/44/122",
@@ -33754,7 +33754,7 @@
       "source": "who"
     },
     "<WHO-2339>": {
-      "name": "Chapter 5: Eye tumours",
+      "name": "Eye tumours",
       "synonyms": [],
       "icd_codes": [],
       "primary_reference": "https://tumourclassification.iarc.who.int/chaptercontent/44/452",
@@ -33979,7 +33979,7 @@
       "source": "who"
     },
     "<WHO-2357>": {
-      "name": "Chapter 6: Soft tissue and bone tumours",
+      "name": "Soft tissue and bone tumours",
       "synonyms": [],
       "icd_codes": [],
       "primary_reference": "https://tumourclassification.iarc.who.int/chaptercontent/44/140",
@@ -35798,7 +35798,7 @@
       "source": "who"
     },
     "<WHO-2471>": {
-      "name": "Chapter 7: Germ cell tumours",
+      "name": "Germ cell tumours",
       "synonyms": [],
       "icd_codes": [],
       "primary_reference": "https://tumourclassification.iarc.who.int/chaptercontent/44/515",
@@ -36085,7 +36085,7 @@
       "source": "who"
     },
     "<WHO-2490>": {
-      "name": "Chapter 8: Renal and male genital tumours",
+      "name": "Renal and male genital tumours",
       "synonyms": [],
       "icd_codes": [],
       "primary_reference": "https://tumourclassification.iarc.who.int/chaptercontent/44/248",
@@ -36422,7 +36422,7 @@
       "source": "who"
     },
     "<WHO-2513>": {
-      "name": "Chapter 9: Female genital tumours",
+      "name": "Female genital tumours",
       "synonyms": [],
       "icd_codes": [],
       "primary_reference": "https://tumourclassification.iarc.who.int/chaptercontent/44/420",
