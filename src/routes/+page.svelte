@@ -2175,20 +2175,9 @@
           mergedPathToId.delete(draggedSourcePath);
         }
 
-        // Also clean up children's stale entries (for section merges)
-        const draggedPrefix = draggedSourcePath + "/";
-        for (const [path] of [...sourceMap.entries()]) {
-          if (path.startsWith(draggedPrefix)) {
-            sourceMap.delete(path);
-          }
-        }
-        for (const [path, subId] of [...mergedPathToId.entries()]) {
-          if (path.startsWith(draggedPrefix)) {
-            unsubscribe(subId);
-            mergedPathToId.delete(path);
-            removeLineage(path);
-          }
-        }
+        // NOTE: Children's stale entries are cleaned up AFTER the section merge
+        // and subscription logic below, so that new entries at target paths are
+        // created before old entries at dragged paths are removed.
 
         // If the dragged item was an array item, reindex its former siblings
         if (isArrayItem) {
@@ -2612,6 +2601,27 @@
           "After markItemAsMerged - subscriberInfo:",
           subscriberInfo.get(subscriberId || ""),
         );
+      }
+
+      // Deferred cleanup: now that section merge, recordSource, and
+      // subscribeItemAndChildren have run, remove stale entries that are
+      // still under the old dragged path (they have been re-created at
+      // the target path by the logic above).
+      if (sourcePanel === "merged") {
+        const draggedPrefix = draggedSourcePath + "/";
+        for (const [path] of [...sourceMap.entries()]) {
+          if (path.startsWith(draggedPrefix)) {
+            sourceMap.delete(path);
+          }
+        }
+        for (const [path, subId] of [...mergedPathToId.entries()]) {
+          if (path.startsWith(draggedPrefix)) {
+            unsubscribe(subId);
+            mergedPathToId.delete(path);
+            removeLineage(path);
+          }
+        }
+        mergedPathToId = new Map(mergedPathToId);
       }
 
       // Trigger reactivity and return
