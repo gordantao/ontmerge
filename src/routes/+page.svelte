@@ -3,7 +3,26 @@
   import Navbar from "$lib/components/Navbar.svelte";
   import * as Card from "$lib/components/ui/card";
   import { File, GitMerge } from "lucide-svelte";
-  import yaml from "js-yaml";
+  import {
+    type ProvenanceEntry,
+    type ProvenanceSource,
+    type ProvenanceAction,
+    type ProvenancePanel,
+    assignNodeIds,
+    generateNodeId,
+    deriveSource,
+    buildUsageMap,
+    buildSourceMap,
+    getLineageForPath,
+    reindexNodeIdsAfterDelete,
+    reindexNodeIdsAfterInsert,
+    remapNodeIdPaths,
+    addProvenanceSource,
+    setProvenance,
+    markProvenanceAsMerged,
+    removeProvenanceForSubtree,
+    cloneProvenance,
+  } from "$lib/provenance";
 
   // Concept metadata from v4 ontology format
   type ConceptMeta = {
@@ -120,427 +139,79 @@
   let llmSuggestions = $state<SuggestedMerge["llmSuggestions"] | null>(null);
 
   // ============================================
-  // PUBLISH-SUBSCRIBE ARCHITECTURE
+  // PROVENANCE SYSTEM (replaces sourceMap, subscriptions, subscriberInfo, lineage, nodeIdMap)
   // ============================================
 
-  // Subscription registry: sourceId -> Set of subscriberIds
-  // When a source item has subscribers, it means it's been used in the merged panel
-  let subscriptions = $state<Map<string, Set<string>>>(new Map());
+  // Stable node IDs: merged-tree path → UUID (survives moves, never changes for a node)
+  let nodeIdMap = $state<Map<string, string>>(new Map());
 
-  // Subscriber info: subscriberId -> { sourceId, source: "left" | "right", isMerged: boolean }
-  // Each merged item can have multiple subscriptions (one from left, one from right if merged)
-  let subscriberInfo = $state<
-    Map<
-      string,
-      { sourceId: string; source: "left" | "right"; isMerged: boolean }[]
-    >
-  >(new Map());
+  // Single source of truth: nodeId → ProvenanceEntry (all source/lineage info)
+  let provenance = $state<Map<string, ProvenanceEntry>>(new Map());
 
-  // Track source of items in merged panel for coloring: path -> "left" | "right" | "both"
-  let sourceMap = $state<Map<string, string>>(new Map());
+  // Derived: merged path → "left" | "right" | "both" | "created" (for TreeView coloring)
+  let sourceMap = $derived.by(() => buildSourceMap(nodeIdMap, provenance));
 
-  // ============================================
-  // LINEAGE TRACKING
-  // ============================================
+  // Legacy type aliases for backward compat within this file
+  type LineageSource = ProvenanceSource;
+  type LineageEntry = ProvenanceEntry;
 
-  // Lineage entry type - tracks where each merged item came from
-  type LineageSource = {
-    panel: "left" | "right" | "user" | "llm";
-    originalPath: string;
-    action:
-      | "added"
-      | "merged"
-      | "header-merged"
-      | "created"
-      | "llm-suggested"
-      | "llm-auto-merged";
-  };
+  // ─── Provenance-based lineage helpers (adapter layer) ─────────────────────
+  // These wrap the provenance system to maintain the same call signatures used
+  // throughout handleDrop and other code, minimizing churn.
 
-  type LineageEntry = {
-    sources: LineageSource[];
-  };
-
-  // Map from merged path to its lineage information
-  let lineage = $state<Map<string, LineageEntry>>(new Map());
-
-  /**
-   * Add or update a lineage record for a merged item.
-   * Tracks where each concept in the merged panel originated from.
-   *
-   * @param mergedPath - The path in the merged data tree (e.g., "Category/Subcategory")
-   * @param panel - Source panel: "left", "right", "user" (manually created), or "llm"
-   * @param originalPath - The original path in the source panel
-   * @param action - How the item was added: "added", "merged", "header-merged", "created", "llm-suggested", or "llm-auto-merged"
-   */
   function addLineage(
     mergedPath: string,
-    panel: "left" | "right" | "user" | "llm",
+    panel: ProvenancePanel,
     originalPath: string,
-    action:
-      | "added"
-      | "merged"
-      | "header-merged"
-      | "created"
-      | "llm-suggested"
-      | "llm-auto-merged" = "added",
+    action: ProvenanceAction = "added",
   ) {
-    console.log("addLineage:", { mergedPath, panel, originalPath, action });
-
-    // Read directly from the current map (works fine for reads)
-    const existing = lineage.get(mergedPath);
-
-    if (existing) {
-      // Check if this source is already recorded
-      const alreadyHasSource = existing.sources.some(
-        (s) => s.panel === panel && s.originalPath === originalPath,
-      );
-      console.log(
-        "addLineage: existing entry found, sources:",
-        existing.sources.length,
-        "alreadyHasSource:",
-        alreadyHasSource,
-      );
-      if (!alreadyHasSource) {
-        // Mutate the existing entry (Svelte 5 tracks deep changes)
-        existing.sources.push({ panel, originalPath, action });
-        console.log(
-          "addLineage: added new source, now have",
-          existing.sources.length,
-          "sources",
-        );
-      }
+    const nodeId = nodeIdMap.get(mergedPath);
+    if (!nodeId) {
+      // Auto-assign if missing
+      const newId = generateNodeId();
+      nodeIdMap.set(mergedPath, newId);
+      addProvenanceSource(provenance, newId, { panel, originalPath, action });
     } else {
-      console.log("addLineage: no existing entry, creating new one");
-      // Add new entry directly to the map
-      lineage.set(mergedPath, {
-        sources: [{ panel, originalPath, action }],
-      });
+      addProvenanceSource(provenance, nodeId, { panel, originalPath, action });
     }
-
-    console.log("addLineage: lineage now has", lineage.size, "entries");
   }
 
-  /**
-   * Update lineage entries when an item is renamed or moved.
-   * Updates all entries that match or are children of the old path.
-   *
-   * @param oldPath - The original path before rename/move
-   * @param newPath - The new path after rename/move
-   */
-  function updateLineagePath(oldPath: string, newPath: string) {
-    // Get entries as array to avoid iterator issues with reactive proxies
-    const entries = Array.from(lineage.entries());
-    const newLineage = new Map<string, LineageEntry>();
-
-    for (const [path, entry] of entries) {
-      if (path === oldPath) {
-        newLineage.set(newPath, entry);
-      } else if (path.startsWith(oldPath + "/")) {
-        const suffix = path.slice(oldPath.length);
-        newLineage.set(newPath + suffix, entry);
-      } else {
-        newLineage.set(path, entry);
-      }
-    }
-    lineage = newLineage;
-  }
-
-  /**
-   * Remove lineage entries for a deleted item and all its children.
-   *
-   * @param path - The path of the deleted item
-   */
   function removeLineage(path: string) {
-    // Get entries as array to avoid iterator issues with reactive proxies
-    const entries = Array.from(lineage.entries());
-    const newLineage = new Map<string, LineageEntry>();
+    removeProvenanceForSubtree(provenance, nodeIdMap, path);
+  }
 
-    for (const [key, entry] of entries) {
-      if (key !== path && !key.startsWith(path + "/")) {
-        newLineage.set(key, entry);
-      }
+  function markLineageAsMerged(mergedPath: string) {
+    const nodeId = nodeIdMap.get(mergedPath);
+    if (nodeId) {
+      markProvenanceAsMerged(provenance, nodeId);
     }
-    lineage = newLineage;
   }
 
   /**
-   * Reindex lineage paths after an array item is deleted.
-   * Shifts down indices for all items after the deleted index.
-   *
-   * @param parentPath - The path to the parent array
-   * @param deletedIndex - The index of the deleted item
+   * Reindex all tracking maps after an array item deletion.
+   * With provenance, only nodeIdMap needs reindexing (provenance is keyed by stable IDs).
    */
   function reindexMergedArrayAfterDelete(
     parentPath: string,
     deletedIndex: number,
     deletedPathKey: string,
   ) {
-    const parentPrefix = parentPath ? parentPath + "/" : "";
-    const deletedPrefix = deletedPathKey + "/";
-
-    // Reindex sourceMap
-    const newSourceMap = new Map<string, string>();
-    for (const [key, value] of sourceMap.entries()) {
-      if (key === deletedPathKey || key.startsWith(deletedPrefix)) continue;
-      if (
-        key.startsWith(parentPrefix) ||
-        (!parentPrefix && /^\d/.test(key))
-      ) {
-        const rest = parentPrefix ? key.slice(parentPrefix.length) : key;
-        const slashIndex = rest.indexOf("/");
-        const indexPart = slashIndex === -1 ? rest : rest.slice(0, slashIndex);
-        const itemIndex = parseInt(indexPart, 10);
-        if (!isNaN(itemIndex) && itemIndex > deletedIndex) {
-          const newKey =
-            parentPrefix +
-            (itemIndex - 1) +
-            (slashIndex === -1 ? "" : rest.slice(slashIndex));
-          newSourceMap.set(newKey, value);
-        } else {
-          newSourceMap.set(key, value);
-        }
-      } else {
-        newSourceMap.set(key, value);
-      }
-    }
-    sourceMap = newSourceMap;
-
-    // Reindex mergedPathToId
-    const newMergedPathToId = new Map<string, string>();
-    for (const [key, id] of mergedPathToId.entries()) {
-      if (key === deletedPathKey || key.startsWith(deletedPrefix)) continue;
-      if (
-        key.startsWith(parentPrefix) ||
-        (!parentPrefix && /^\d/.test(key))
-      ) {
-        const rest = parentPrefix ? key.slice(parentPrefix.length) : key;
-        const slashIndex = rest.indexOf("/");
-        const indexPart = slashIndex === -1 ? rest : rest.slice(0, slashIndex);
-        const itemIndex = parseInt(indexPart, 10);
-        if (!isNaN(itemIndex) && itemIndex > deletedIndex) {
-          const newKey =
-            parentPrefix +
-            (itemIndex - 1) +
-            (slashIndex === -1 ? "" : rest.slice(slashIndex));
-          newMergedPathToId.set(newKey, id);
-        } else {
-          newMergedPathToId.set(key, id);
-        }
-      } else {
-        newMergedPathToId.set(key, id);
-      }
-    }
-    mergedPathToId = newMergedPathToId;
-
-    // Reindex lineage
-    reindexLineageAfterDelete(parentPath, deletedIndex);
+    // Remove provenance for deleted node and children
+    removeProvenanceForSubtree(provenance, nodeIdMap, deletedPathKey);
+    // Reindex the path→id mapping
+    nodeIdMap = reindexNodeIdsAfterDelete(nodeIdMap, parentPath, deletedIndex, deletedPathKey);
   }
 
   function reindexMergedArrayAfterInsert(
     parentPath: string,
     insertedIndex: number,
   ) {
-    const parentPrefix = parentPath ? parentPath + "/" : "";
-
-    // Reindex sourceMap: shift items at insertedIndex+ up by 1
-    const newSourceMap = new Map<string, string>();
-    for (const [key, value] of sourceMap.entries()) {
-      if (
-        key.startsWith(parentPrefix) ||
-        (!parentPrefix && /^\d/.test(key))
-      ) {
-        const rest = parentPrefix ? key.slice(parentPrefix.length) : key;
-        const slashIndex = rest.indexOf("/");
-        const indexPart = slashIndex === -1 ? rest : rest.slice(0, slashIndex);
-        const itemIndex = parseInt(indexPart, 10);
-        if (!isNaN(itemIndex) && itemIndex >= insertedIndex) {
-          const newKey =
-            parentPrefix +
-            (itemIndex + 1) +
-            (slashIndex === -1 ? "" : rest.slice(slashIndex));
-          newSourceMap.set(newKey, value);
-        } else {
-          newSourceMap.set(key, value);
-        }
-      } else {
-        newSourceMap.set(key, value);
-      }
-    }
-    sourceMap = newSourceMap;
-
-    // Reindex mergedPathToId
-    const newMergedPathToId = new Map<string, string>();
-    for (const [key, id] of mergedPathToId.entries()) {
-      if (
-        key.startsWith(parentPrefix) ||
-        (!parentPrefix && /^\d/.test(key))
-      ) {
-        const rest = parentPrefix ? key.slice(parentPrefix.length) : key;
-        const slashIndex = rest.indexOf("/");
-        const indexPart = slashIndex === -1 ? rest : rest.slice(0, slashIndex);
-        const itemIndex = parseInt(indexPart, 10);
-        if (!isNaN(itemIndex) && itemIndex >= insertedIndex) {
-          const newKey =
-            parentPrefix +
-            (itemIndex + 1) +
-            (slashIndex === -1 ? "" : rest.slice(slashIndex));
-          newMergedPathToId.set(newKey, id);
-        } else {
-          newMergedPathToId.set(key, id);
-        }
-      } else {
-        newMergedPathToId.set(key, id);
-      }
-    }
-    mergedPathToId = newMergedPathToId;
-
-    // Reindex lineage
-    const entries = Array.from(lineage.entries());
-    const newLineage = new Map<string, LineageEntry>();
-    for (const [path, entry] of entries) {
-      if (path.startsWith(parentPrefix)) {
-        const rest = path.slice(parentPrefix.length);
-        const slashIndex = rest.indexOf("/");
-        const indexPart = slashIndex === -1 ? rest : rest.slice(0, slashIndex);
-        const itemIndex = parseInt(indexPart, 10);
-        if (!isNaN(itemIndex) && itemIndex >= insertedIndex) {
-          const newKey =
-            parentPrefix +
-            (itemIndex + 1) +
-            (slashIndex === -1 ? "" : rest.slice(slashIndex));
-          newLineage.set(newKey, entry);
-        } else {
-          newLineage.set(path, entry);
-        }
-      } else {
-        newLineage.set(path, entry);
-      }
-    }
-    lineage = newLineage;
-  }
-
-  function reindexLineageAfterDelete(parentPath: string, deletedIndex: number) {
-    const parentPrefix = parentPath ? parentPath + "/" : "";
-    // Get entries as array to avoid iterator issues with reactive proxies
-    const entries = Array.from(lineage.entries());
-    const newLineage = new Map<string, LineageEntry>();
-
-    for (const [path, entry] of entries) {
-      if (path.startsWith(parentPrefix)) {
-        const rest = path.slice(parentPrefix.length);
-        const slashIndex = rest.indexOf("/");
-        const indexPart = slashIndex === -1 ? rest : rest.slice(0, slashIndex);
-        const itemIndex = parseInt(indexPart, 10);
-
-        if (!isNaN(itemIndex) && itemIndex > deletedIndex) {
-          // Reindex this entry (shift down by 1)
-          const newIndex = itemIndex - 1;
-          const newKey =
-            parentPrefix +
-            newIndex +
-            (slashIndex === -1 ? "" : rest.slice(slashIndex));
-          newLineage.set(newKey, entry);
-        } else {
-          newLineage.set(path, entry);
-        }
-      } else {
-        newLineage.set(path, entry);
-      }
-    }
-    lineage = newLineage;
-  }
-
-  /**
-   * Mark all existing lineage sources for a path as "merged".
-   * Called when an item is combined with another from a different source.
-   *
-   * @param mergedPath - The path of the merged item
-   */
-  function markLineageAsMerged(mergedPath: string) {
-    const entry = lineage.get(mergedPath);
-    console.log(
-      "markLineageAsMerged called for",
-      mergedPath,
-      "- entry found:",
-      !!entry,
-      "sources:",
-      entry?.sources?.length || 0,
-    );
-    if (entry) {
-      // Mutate the sources in place (Svelte 5 tracks deep changes)
-      for (const source of entry.sources) {
-        source.action = "merged";
-      }
-    }
-  }
-
-  /**
-   * Convert lineage Map to a plain object for JSON export.
-   *
-   * @returns Record mapping paths to their lineage sources
-   */
-  function getLineageExport(): Record<
-    string,
-    { sources: { panel: string; originalPath: string; action: string }[] }
-  > {
-    const entries = Array.from(lineage.entries());
-    const result: Record<
-      string,
-      { sources: { panel: string; originalPath: string; action: string }[] }
-    > = {};
-    for (const [path, entry] of entries) {
-      result[path] = {
-        sources: entry.sources.map((s) => ({
-          panel: s.panel,
-          originalPath: s.originalPath,
-          action: s.action,
-        })),
-      };
-    }
-    return result;
+    nodeIdMap = reindexNodeIdsAfterInsert(nodeIdMap, parentPath, insertedIndex);
   }
 
   // ============================================
   // EXPORT FUNCTIONS
   // ============================================
-
-  /**
-   * Export merged data as a simple YAML file without lineage information.
-   * Downloads as "merged.yaml".
-   */
-  function exportSimpleYaml() {
-    const data = $state.snapshot(mergedData);
-    const yamlStr = yaml.dump(data, {
-      indent: 2,
-      lineWidth: -1, // No line wrapping
-      noRefs: true,
-      sortKeys: false,
-    });
-    downloadFile(yamlStr, "merged.yaml", "application/x-yaml");
-  }
-
-  /**
-   * Export merged data with lineage in v1 format (legacy/backwards compatibility).
-   * Includes data, lineage, and sourceMap. Downloads as "merged-with-lineage-v1.json".
-   */
-  function exportWithLineageV1() {
-    const data = $state.snapshot(mergedData);
-    const lineageData = getLineageExport();
-    const sourceMapData: Record<string, string> = {};
-    for (const [path, source] of sourceMap.entries()) {
-      sourceMapData[path] = source;
-    }
-
-    const exportData = {
-      version: 1,
-      data: data,
-      lineage: lineageData,
-      sourceMap: sourceMapData,
-    };
-
-    const jsonStr = JSON.stringify(exportData, null, 2);
-    downloadFile(jsonStr, "merged-with-lineage-v1.json", "application/json");
-  }
 
   /**
    * Export in unified v4 format (id-keyed with metadata).
@@ -607,7 +278,7 @@
     function getPreferredSource(
       namePath: string,
     ): "left" | "right" | "both" | null {
-      const entry = (lineage as Map<string, LineageEntry>).get(namePath);
+      const entry = getLineageForPath(namePath, nodeIdMap, provenance);
       if (!entry) return null;
       const panels = new Set(
         entry.sources
@@ -631,7 +302,7 @@
       namePath: string,
       resolvedId: string,
     ): ConceptMeta {
-      const entry = (lineage as Map<string, LineageEntry>).get(namePath);
+      const entry = getLineageForPath(namePath, nodeIdMap, provenance);
       const leftRightSources =
         entry?.sources.filter(
           (s) => s.panel === "left" || s.panel === "right",
@@ -772,9 +443,16 @@
       }
     > = {};
 
-    for (const [namePath, entry] of (
-      lineage as Map<string, LineageEntry>
-    ).entries()) {
+    // Build a name-path → ProvenanceEntry map from nodeIdMap+provenance
+    const lineageExportMap = new Map<string, LineageEntry>();
+    for (const [path, nodeId] of nodeIdMap) {
+      const pEntry = provenance.get(nodeId);
+      if (pEntry && pEntry.sources.length > 0) {
+        lineageExportMap.set(path, pEntry);
+      }
+    }
+
+    for (const [namePath, entry] of lineageExportMap.entries()) {
       const idPath = namePathToIdPath.get(namePath);
       if (!idPath) continue;
 
@@ -894,66 +572,53 @@
         const content = e.target?.result as string;
         const imported = JSON.parse(content);
 
-        // Handle both v1 and v2 formats
-        if (imported.version === 1) {
-          mergedData = forceLowercaseTerms(structuredClone(imported.data));
-
-          // Load lineage
-          if (imported.lineage) {
-            const newLineage = new Map<string, LineageEntry>();
-            for (const [path, entry] of Object.entries(imported.lineage)) {
-              const typedEntry = entry as any;
-              newLineage.set(path, {
+        // Helper to import a path-keyed lineage map into provenance
+        function importLineageToProvenance(
+          importedLineage: Record<string, any>,
+          data: unknown,
+        ) {
+          const newNodeIdMap = new Map<string, string>();
+          const newProvenance = new Map<string, ProvenanceEntry>();
+          assignNodeIds(data, "", newNodeIdMap);
+          for (const [path, entry] of Object.entries(importedLineage)) {
+            const typedEntry = entry as any;
+            const nodeId = newNodeIdMap.get(path);
+            if (nodeId) {
+              newProvenance.set(nodeId, {
                 sources: (typedEntry.sources || []).map((s: any) => ({
-                  panel: s.panel,
-                  originalPath: s.originalPath,
-                  action: s.action,
+                  panel: s.panel as ProvenancePanel,
+                  originalPath: s.originalPath as string,
+                  action: (s.action || "added") as ProvenanceAction,
                 })),
               });
             }
-            lineage = newLineage;
           }
+          nodeIdMap = newNodeIdMap;
+          provenance = newProvenance;
+        }
 
-          // Load source map
-          if (imported.sourceMap) {
-            const newSourceMap = new Map<string, string>();
-            for (const [path, source] of Object.entries(imported.sourceMap)) {
-              newSourceMap.set(path, source as string);
-            }
-            sourceMap = newSourceMap;
+        // Handle v1, v2, and v4 formats
+        if (imported.version === 1) {
+          mergedData = forceLowercaseTerms(structuredClone(imported.data));
+          if (imported.lineage) {
+            importLineageToProvenance(imported.lineage, mergedData);
+          } else {
+            nodeIdMap = new Map();
+            provenance = new Map();
+            assignNodeIds(mergedData, "", nodeIdMap);
           }
         } else if (imported.version === 2) {
-          mergedData = forceLowercaseTerms(
-            structuredClone(imported.mergedData),
-          );
+          mergedData = forceLowercaseTerms(structuredClone(imported.mergedData));
           suggestionMetadata = imported.metadata;
           pendingReviews = imported.pendingReview || [];
           llmSuggestions = imported.llmSuggestions || null;
           loadedFromSuggestion = imported.metadata?.source === "llm";
-
-          // Load lineage
           if (imported.lineage) {
-            const newLineage = new Map<string, LineageEntry>();
-            for (const [path, entry] of Object.entries(imported.lineage)) {
-              const typedEntry = entry as any;
-              newLineage.set(path, {
-                sources: (typedEntry.sources || []).map((s: any) => ({
-                  panel: s.panel,
-                  originalPath: s.originalPath,
-                  action: s.action,
-                })),
-              });
-            }
-            lineage = newLineage;
-          }
-
-          // Load source map
-          if (imported.sourceMap) {
-            const newSourceMap = new Map<string, string>();
-            for (const [path, source] of Object.entries(imported.sourceMap)) {
-              newSourceMap.set(path, source as string);
-            }
-            sourceMap = newSourceMap;
+            importLineageToProvenance(imported.lineage, mergedData);
+          } else {
+            nodeIdMap = new Map();
+            provenance = new Map();
+            assignNodeIds(mergedData, "", nodeIdMap);
           }
         } else if (imported.version === 4) {
           const v4sm = imported as SuggestedMergeV4;
@@ -973,12 +638,11 @@
             v4StructureToNameTree(v4sm.structure, v4sm.concepts),
           );
 
-          // Initialize mergedPathToId before rebuilding subscriptions
-          mergedPathToId.clear();
-          initializePathIds(mergedData, "", mergedPathToId);
-          mergedPathToId = new Map(mergedPathToId);
+          // Assign node IDs for the merged tree
+          const newNodeIdMap = new Map<string, string>();
+          assignNodeIds(mergedData, "", newNodeIdMap);
 
-          // Translate v4 lineage (ID-keyed) → name-keyed LineageEntry map
+          // Translate v4 lineage (ID-keyed) → provenance
           const idToNamePath = buildV4IdToNamePath(v4sm.structure, v4sm.concepts);
           const leftNameToPath = buildNameToSourcePath(leftPathToId);
           const rightNameToPath = buildNameToSourcePath(rightPathToId);
@@ -1031,90 +695,19 @@
             }
           }
           fillLineageV4(mergedData, "");
-          lineage = newLineage;
 
-          // Derive sourceMap from concept source metadata
-          const newSourceMap = new Map<string, string>();
-          for (const [idPath, namePath] of idToNamePath) {
-            const segments = idPath.split("/");
-            const lastId = segments[segments.length - 1];
-            if (/^\d+$/.test(lastId)) continue;
-            const src = v4sm.concepts[lastId]?.source ?? "merged";
-            const side =
-              src === "pathout" ? "left" : src === "who" ? "right" : src === "created" ? "created" : "both";
-            newSourceMap.set(namePath, side);
-          }
-          function fillSourceMapV4Import(
-            obj: unknown,
-            basePath: string,
-            parentSource: string | undefined,
-          ) {
-            if (obj && typeof obj === "object") {
-              if (Array.isArray(obj)) {
-                obj.forEach((item, idx) => {
-                  const childPath = `${basePath}/${idx}`;
-                  if (!newSourceMap.has(childPath) && parentSource) {
-                    newSourceMap.set(childPath, parentSource);
-                  }
-                  fillSourceMapV4Import(item, childPath, newSourceMap.get(childPath) || parentSource);
-                });
-              } else {
-                Object.entries(obj as Record<string, unknown>).forEach(
-                  ([key, val]) => {
-                    const childPath = basePath ? `${basePath}/${key}` : key;
-                    if (!newSourceMap.has(childPath) && parentSource) {
-                      newSourceMap.set(childPath, parentSource);
-                    }
-                    fillSourceMapV4Import(val, childPath, newSourceMap.get(childPath) || parentSource);
-                  },
-                );
-              }
+          // Convert lineage map to provenance
+          const newProvenance = new Map<string, ProvenanceEntry>();
+          for (const [path, entry] of newLineage) {
+            const nodeId = newNodeIdMap.get(path);
+            if (nodeId) {
+              newProvenance.set(nodeId, { sources: entry.sources.map((s) => ({ ...s })) });
             }
           }
-          fillSourceMapV4Import(mergedData, "", undefined);
-          sourceMap = newSourceMap;
 
-          // Rebuild subscriptions and subscriberInfo from lineage
-          const newSubscriptions = new Map<string, Set<string>>();
-          const newSubscriberInfo = new Map<
-            string,
-            { sourceId: string; source: "left" | "right"; isMerged: boolean }[]
-          >();
-          for (const [mergedPath, lineageEntry] of lineage.entries()) {
-            const subscriberId = mergedPathToId.get(mergedPath);
-            if (!subscriberId) continue;
-            const leftRightSources = lineageEntry.sources.filter(
-              (s) => s.panel === "left" || s.panel === "right",
-            );
-            const isMerged = leftRightSources.length > 1;
-            for (const src of leftRightSources) {
-              const panel = src.panel as "left" | "right";
-              const pathToId = panel === "left" ? leftPathToId : rightPathToId;
-              const sourceId = findMatchingSourceId(src.originalPath, pathToId);
-              if (sourceId) {
-                if (!newSubscriptions.has(sourceId)) {
-                  newSubscriptions.set(sourceId, new Set());
-                }
-                newSubscriptions.get(sourceId)!.add(subscriberId);
-                if (!newSubscriberInfo.has(subscriberId)) {
-                  newSubscriberInfo.set(subscriberId, []);
-                }
-                newSubscriberInfo.get(subscriberId)!.push({
-                  sourceId,
-                  source: panel,
-                  isMerged,
-                });
-              }
-            }
-          }
-          subscriptions = newSubscriptions;
-          subscriberInfo = newSubscriberInfo;
+          nodeIdMap = newNodeIdMap;
+          provenance = newProvenance;
         }
-
-        // Re-initialize merged path IDs
-        mergedPathToId.clear();
-        initializePathIds(mergedData, "", mergedPathToId);
-        mergedPathToId = new Map(mergedPathToId);
 
         console.log("Imported merge file successfully");
       } catch (err) {
@@ -1153,315 +746,61 @@
 
   type HistorySnapshot = {
     mergedData: any;
-    sourceMap: Map<string, string>;
-    lineage: Map<string, LineageEntry>;
-    subscriptions: Map<string, Set<string>>;
-    subscriberInfo: Map<
-      string,
-      { sourceId: string; source: "left" | "right"; isMerged: boolean }[]
-    >;
-    mergedPathToId: Map<string, string>;
+    nodeIdMap: Map<string, string>;
+    provenance: Map<string, ProvenanceEntry>;
   };
 
   const MAX_HISTORY_SIZE = 50;
   let historyStack = $state<HistorySnapshot[]>([]);
   let redoStack = $state<HistorySnapshot[]>([]);
 
-  /**
-   * Save the current state to the undo history stack.
-   * Call before any mutation to enable undo. Clears the redo stack.
-   */
-  function saveToHistory() {
-    const snapshot: HistorySnapshot = {
+  function takeSnapshot(): HistorySnapshot {
+    return {
       mergedData: structuredClone($state.snapshot(mergedData)),
-      sourceMap: new Map($state.snapshot(sourceMap) as Map<string, string>),
-      lineage: new Map(
-        Array.from(
-          ($state.snapshot(lineage) as Map<string, LineageEntry>).entries(),
-        ).map(([k, v]) => [
-          k,
-          { ...v, sources: v.sources.map((s) => ({ ...s })) },
-        ]),
-      ),
-      subscriptions: new Map(
-        Array.from(
-          (
-            $state.snapshot(subscriptions) as Map<string, Set<string>>
-          ).entries(),
-        ).map(([k, v]) => [k, new Set(v)]),
-      ),
-      subscriberInfo: new Map(
-        Array.from(
-          ($state.snapshot(subscriberInfo) as Map<string, any[]>).entries(),
-        ).map(([k, v]) => [k, v.map((info) => ({ ...info }))]),
-      ),
-      mergedPathToId: new Map(
-        $state.snapshot(mergedPathToId) as Map<string, string>,
-      ),
+      nodeIdMap: new Map($state.snapshot(nodeIdMap) as Map<string, string>),
+      provenance: cloneProvenance($state.snapshot(provenance) as Map<string, ProvenanceEntry>),
     };
+  }
 
-    historyStack.push(snapshot);
+  function restoreSnapshot(snapshot: HistorySnapshot) {
+    mergedData = snapshot.mergedData;
+    nodeIdMap = snapshot.nodeIdMap;
+    provenance = snapshot.provenance;
+  }
 
-    // Limit history size
+  function saveToHistory() {
+    historyStack.push(takeSnapshot());
     if (historyStack.length > MAX_HISTORY_SIZE) {
       historyStack.shift();
     }
-
-    // Clear redo stack on new action
     redoStack = [];
-
-    // Trigger reactivity
     historyStack = [...historyStack];
   }
 
-  /**
-   * Undo the last action by restoring the previous state from history.
-   * Pushes current state to redo stack before restoring.
-   */
   function undo() {
     if (historyStack.length === 0) return;
-
-    // Save current state to redo stack
-    const currentSnapshot: HistorySnapshot = {
-      mergedData: structuredClone($state.snapshot(mergedData)),
-      sourceMap: new Map($state.snapshot(sourceMap) as Map<string, string>),
-      lineage: new Map(
-        Array.from(
-          ($state.snapshot(lineage) as Map<string, LineageEntry>).entries(),
-        ).map(([k, v]) => [
-          k,
-          { ...v, sources: v.sources.map((s) => ({ ...s })) },
-        ]),
-      ),
-      subscriptions: new Map(
-        Array.from(
-          (
-            $state.snapshot(subscriptions) as Map<string, Set<string>>
-          ).entries(),
-        ).map(([k, v]) => [k, new Set(v)]),
-      ),
-      subscriberInfo: new Map(
-        Array.from(
-          ($state.snapshot(subscriberInfo) as Map<string, any[]>).entries(),
-        ).map(([k, v]) => [k, v.map((info) => ({ ...info }))]),
-      ),
-      mergedPathToId: new Map(
-        $state.snapshot(mergedPathToId) as Map<string, string>,
-      ),
-    };
-    redoStack.push(currentSnapshot);
+    redoStack.push(takeSnapshot());
     redoStack = [...redoStack];
-
-    // Restore previous state
     const snapshot = historyStack.pop()!;
     historyStack = [...historyStack];
-
-    mergedData = snapshot.mergedData;
-    sourceMap = snapshot.sourceMap;
-    lineage = snapshot.lineage;
-    subscriptions = snapshot.subscriptions;
-    subscriberInfo = snapshot.subscriberInfo;
-    mergedPathToId = snapshot.mergedPathToId;
+    restoreSnapshot(snapshot);
   }
 
-  /**
-   * Redo the last undone action by restoring from the redo stack.
-   * Pushes current state to history stack before restoring.
-   */
   function redo() {
     if (redoStack.length === 0) return;
-
-    // Save current state to history stack
-    const currentSnapshot: HistorySnapshot = {
-      mergedData: structuredClone($state.snapshot(mergedData)),
-      sourceMap: new Map($state.snapshot(sourceMap) as Map<string, string>),
-      lineage: new Map(
-        Array.from(
-          ($state.snapshot(lineage) as Map<string, LineageEntry>).entries(),
-        ).map(([k, v]) => [
-          k,
-          { ...v, sources: v.sources.map((s) => ({ ...s })) },
-        ]),
-      ),
-      subscriptions: new Map(
-        Array.from(
-          (
-            $state.snapshot(subscriptions) as Map<string, Set<string>>
-          ).entries(),
-        ).map(([k, v]) => [k, new Set(v)]),
-      ),
-      subscriberInfo: new Map(
-        Array.from(
-          ($state.snapshot(subscriberInfo) as Map<string, any[]>).entries(),
-        ).map(([k, v]) => [k, v.map((info) => ({ ...info }))]),
-      ),
-      mergedPathToId: new Map(
-        $state.snapshot(mergedPathToId) as Map<string, string>,
-      ),
-    };
-    historyStack.push(currentSnapshot);
+    historyStack.push(takeSnapshot());
     historyStack = [...historyStack];
-
-    // Restore redo state
     const snapshot = redoStack.pop()!;
     redoStack = [...redoStack];
-
-    mergedData = snapshot.mergedData;
-    sourceMap = snapshot.sourceMap;
-    lineage = snapshot.lineage;
-    subscriptions = snapshot.subscriptions;
-    subscriberInfo = snapshot.subscriberInfo;
-    mergedPathToId = snapshot.mergedPathToId;
+    restoreSnapshot(snapshot);
   }
 
   // Derived state for UI
   let canUndo = $derived(historyStack.length > 0);
   let canRedo = $derived(redoStack.length > 0);
 
-  // Counter for generating unique IDs
-  let idCounter = 0;
-
-  /**
-   * Generate a unique ID for subscription tracking.
-   * Uses an incrementing counter combined with timestamp.
-   *
-   * @returns Unique string ID
-   */
-  function generateId(): string {
-    return `id_${++idCounter}_${Date.now()}`;
-  }
-
-  // ============================================
-  // SUBSCRIPTION HELPERS
-  // ============================================
-
-  /**
-   * Subscribe a merged item to a source item for tracking usage.
-   * Updates both subscriptions map (source -> subscribers) and
-   * subscriberInfo map (subscriber -> sources).
-   *
-   * @param subscriberId - ID of the merged item (subscriber)
-   * @param sourceId - ID of the source item being subscribed to
-   * @param source - Which panel the source is from ("left" or "right")
-   * @param isMerged - Whether this subscription is part of a merge (both sources)
-   */
-  function subscribe(
-    subscriberId: string,
-    sourceId: string,
-    source: "left" | "right",
-    isMerged: boolean = false,
-  ) {
-    // Add to subscriptions map (source -> subscribers)
-    if (!subscriptions.has(sourceId)) {
-      subscriptions.set(sourceId, new Set());
-    }
-    subscriptions.get(sourceId)!.add(subscriberId);
-
-    // Add to subscriberInfo map (subscriber -> sources)
-    if (!subscriberInfo.has(subscriberId)) {
-      subscriberInfo.set(subscriberId, []);
-    }
-    const infos = subscriberInfo.get(subscriberId)!;
-    // Check if already subscribed to this source
-    const existing = infos.find((i) => i.sourceId === sourceId);
-    if (existing) {
-      existing.isMerged = existing.isMerged || isMerged;
-    } else {
-      infos.push({ sourceId, source, isMerged });
-    }
-
-    // If this subscription is marked as merged, mark ALL subscriptions for this subscriber as merged
-    // This handles the case where we're adding a second source to an existing subscriber
-    if (isMerged) {
-      for (const info of infos) {
-        info.isMerged = true;
-      }
-    }
-
-    // Trigger reactivity
-    subscriptions = new Map(subscriptions);
-    subscriberInfo = new Map(subscriberInfo);
-  }
-
-  /**
-   * Unsubscribe a merged item from all its sources.
-   * Removes from both subscriptions and subscriberInfo maps.
-   *
-   * @param subscriberId - ID of the merged item to unsubscribe
-   */
-  function unsubscribe(subscriberId: string) {
-    const infos = subscriberInfo.get(subscriberId);
-    if (infos) {
-      for (const info of infos) {
-        const subs = subscriptions.get(info.sourceId);
-        if (subs) {
-          subs.delete(subscriberId);
-          if (subs.size === 0) {
-            subscriptions.delete(info.sourceId);
-          }
-        }
-      }
-    }
-    subscriberInfo.delete(subscriberId);
-
-    // Trigger reactivity
-    subscriptions = new Map(subscriptions);
-    subscriberInfo = new Map(subscriberInfo);
-  }
-
-  /**
-   * Mark all subscriptions for a subscriber as "merged".
-   * Called when an item combines sources from both left and right panels.
-   *
-   * @param subscriberId - ID of the merged item
-   */
-  function markAsMerged(subscriberId: string) {
-    const infos = subscriberInfo.get(subscriberId);
-    console.log(
-      "markAsMerged:",
-      subscriberId?.substring(0, 8) + "...",
-      "infos:",
-      infos?.map((i) => ({
-        sourceId: i.sourceId?.substring(0, 8) + "...",
-        source: i.source,
-        isMerged: i.isMerged,
-      })),
-    );
-    if (infos) {
-      for (const info of infos) {
-        info.isMerged = true;
-      }
-      subscriberInfo = new Map(subscriberInfo);
-    }
-  }
-
-  /**
-   * Get the usage status of a source item based on its subscribers.
-   * Used to style source panel items (normal, italic/added, bold/merged).
-   *
-   * @param sourceId - ID of the source item to check
-   * @returns "unused" if no subscribers, "added" if subscribed, "merged" if combined with another source
-   */
-  function getSourceStatus(sourceId: string): "unused" | "added" | "merged" {
-    const subs = subscriptions.get(sourceId);
-    if (!subs || subs.size === 0) {
-      return "unused";
-    }
-
-    // Check if any subscriber is in a "merged" state
-    for (const subId of subs) {
-      const infos = subscriberInfo.get(subId);
-      if (infos) {
-        for (const info of infos) {
-          if (info.sourceId === sourceId && info.isMerged) {
-            return "merged";
-          }
-        }
-      }
-    }
-
-    return "added";
-  }
+  // Subscription system removed — provenance is the single source of truth.
+  // Usage status is derived via buildUsageMap from provenance.ts.
 
   // ============================================
   // PATH NORMALIZATION HELPERS
@@ -1513,7 +852,7 @@
     mergedPath: string,
     panel: "left" | "right",
   ): string | null {
-    const entry = lineage.get(mergedPath);
+    const entry = getLineageForPath(mergedPath, nodeIdMap, provenance);
     if (!entry) return null;
     const match = entry.sources.find((s) => s.panel === panel);
     return match?.originalPath ?? null;
@@ -1537,21 +876,12 @@
   // DERIVED USAGE MAPS FOR TREE VIEW
   // ============================================
 
-  // Build path -> sourceId mapping for source panels
-  // This maps each path in the source data to its unique ID for subscription lookup
+  // Build path -> sourceId mapping for source panels (used for hover/highlight lookups)
   let leftPathToId = $state<Map<string, string>>(new Map());
   let rightPathToId = $state<Map<string, string>>(new Map());
 
-  // Build path -> subscriberId mapping for merged panel
-  let mergedPathToId = $state<Map<string, string>>(new Map());
-
   /**
-   * Initialize path-to-ID mappings for a data tree.
-   * Recursively walks the tree and assigns unique IDs to each path.
-   *
-   * @param obj - The data tree to process
-   * @param basePath - Current path prefix (for recursion)
-   * @param pathToId - Map to populate with path -> ID mappings
+   * Initialize path-to-ID mappings for a source data tree.
    */
   function initializePathIds(
     obj: any,
@@ -1564,7 +894,7 @@
       obj.forEach((item, idx) => {
         const path = basePath ? `${basePath}/${idx}` : String(idx);
         if (!pathToId.has(path)) {
-          pathToId.set(path, generateId());
+          pathToId.set(path, generateNodeId());
         }
         initializePathIds(item, path, pathToId);
       });
@@ -1572,35 +902,16 @@
       Object.entries(obj).forEach(([key, value]) => {
         const path = basePath ? `${basePath}/${key}` : key;
         if (!pathToId.has(path)) {
-          pathToId.set(path, generateId());
+          pathToId.set(path, generateNodeId());
         }
         initializePathIds(value, path, pathToId);
       });
     }
   }
 
-  // Derive usage maps from subscriptions
-  let leftUsageMap = $derived.by(() => {
-    const usageMap = new Map<string, string>();
-    for (const [path, sourceId] of leftPathToId) {
-      const status = getSourceStatus(sourceId);
-      if (status !== "unused") {
-        usageMap.set(path, status);
-      }
-    }
-    return usageMap;
-  });
-
-  let rightUsageMap = $derived.by(() => {
-    const usageMap = new Map<string, string>();
-    for (const [path, sourceId] of rightPathToId) {
-      const status = getSourceStatus(sourceId);
-      if (status !== "unused") {
-        usageMap.set(path, status);
-      }
-    }
-    return usageMap;
-  });
+  // Derive usage maps from provenance
+  let leftUsageMap = $derived.by(() => buildUsageMap("left", leftPathToId, provenance));
+  let rightUsageMap = $derived.by(() => buildUsageMap("right", rightPathToId, provenance));
 
   /**
    * Build a name → first matching path reverse map from a pathToId map.
@@ -1729,32 +1040,6 @@
   }
 
   /**
-   * Find the stable source ID for a given path string, with normalization fallbacks.
-   */
-  function findMatchingSourceId(
-    originalPath: string,
-    pathToId: Map<string, string>,
-  ): string | undefined {
-    let sourceId = pathToId.get(originalPath);
-    if (sourceId) return sourceId;
-
-    sourceId = pathToId.get(originalPath.trim());
-    if (sourceId) return sourceId;
-
-    const normalizedPath = originalPath.replace(/\(5th ed\.\)/g, "").trim();
-    for (const [key, id] of pathToId.entries()) {
-      const keyNormalized = key.replace(/\(5th ed\.\)/g, "").trim();
-      if (
-        keyNormalized === normalizedPath ||
-        keyNormalized === originalPath.trim()
-      ) {
-        return id;
-      }
-    }
-    return undefined;
-  }
-
-  /**
    * Convert a v4 id-keyed structure back to a name-keyed tree.
    * Used when loading a v4 suggestedMerge file into the merge panel.
    *
@@ -1833,15 +1118,16 @@
   // ============================================
 
   /**
-   * Subscribe a merged item and all its children to their source items.
-   * Recursively processes the value tree to set up subscriptions.
+   * Record provenance for a merged item and all its children.
+   * Ensures nodeIdMap entries exist for all paths.
    *
    * @param mergedPath - Path in the merged panel
    * @param sourcePath - Corresponding path in the source panel
    * @param source - Which source panel ("left" or "right")
-   * @param value - The value/subtree being subscribed
+   * @param value - The value/subtree being tracked
    * @param isMerged - Whether this is part of a merge operation
-   * @param trackLineage - Whether to record in lineage (default: true)
+   * @param trackLineage - Whether to record provenance (default: true)
+   * @param mergedTree - When provided, use actual merged state for correct array index mapping
    */
   function subscribeItemAndChildren(
     mergedPath: string,
@@ -1849,47 +1135,35 @@
     source: "left" | "right",
     value: unknown,
     isMerged: boolean = false,
-    trackLineage: boolean = true, // Whether to track in lineage
-    mergedTree?: unknown, // When provided, use actual merged state for correct array index mapping
+    trackLineage: boolean = true,
+    mergedTree?: unknown,
   ) {
-    const pathToId = source === "left" ? leftPathToId : rightPathToId;
-    const sourceId = pathToId.get(sourcePath);
-
-    // Create or get subscriber ID for this merged path
-    let subscriberId = mergedPathToId.get(mergedPath);
-    if (!subscriberId) {
-      subscriberId = generateId();
-      mergedPathToId.set(mergedPath, subscriberId);
+    // Ensure nodeIdMap entry exists
+    if (!nodeIdMap.has(mergedPath)) {
+      nodeIdMap.set(mergedPath, generateNodeId());
     }
 
-    if (sourceId) {
-      subscribe(subscriberId, sourceId, source, isMerged);
-    }
-
-    // Track lineage regardless of whether sourceId exists
-    // This ensures lineage is recorded even for dynamically created paths
     if (trackLineage) {
-      const action = isMerged ? "merged" : "added";
+      const action: ProvenanceAction = isMerged ? "merged" : "added";
       addLineage(mergedPath, source, sourcePath, action);
     }
 
-    // Recursively subscribe children - but children are NOT marked as merged
-    // unless they themselves are individually merged (which would happen in a separate call)
+    // Recursively process children
     if (value && typeof value === "object") {
       if (Array.isArray(value)) {
         if (mergedTree && Array.isArray(mergedTree)) {
-          // Merge-aware: map each source item to its actual index in the merged array.
-          // After addToData dedup/concat, dragged index N may not correspond to merged index N.
           value.forEach((item, srcIdx) => {
             const mergedIdx = (mergedTree as unknown[]).findIndex(
-              (ex) =>
-                typeof ex === typeof item && String(ex) === String(item),
+              (ex) => typeof ex === typeof item && String(ex) === String(item),
             );
             if (mergedIdx !== -1) {
-              const itemIsMerged =
-                sourceMap.get(`${mergedPath}/${mergedIdx}`) === "both";
+              const childMergedPath = `${mergedPath}/${mergedIdx}`;
+              const existingEntry = getLineageForPath(childMergedPath, nodeIdMap, provenance);
+              const itemIsMerged = existingEntry
+                ? existingEntry.sources.some((s) => (s.panel === "left" || s.panel === "right") && s.panel !== source)
+                : false;
               subscribeItemAndChildren(
-                `${mergedPath}/${mergedIdx}`,
+                childMergedPath,
                 `${sourcePath}/${srcIdx}`,
                 source,
                 item,
@@ -1899,21 +1173,17 @@
               );
             }
           });
-        } else if (
-          mergedTree &&
-          typeof mergedTree === "object" &&
-          !Array.isArray(mergedTree)
-        ) {
-          // Array value merged into object target: map each array item to its key in the merged object
+        } else if (mergedTree && typeof mergedTree === "object" && !Array.isArray(mergedTree)) {
           value.forEach((item, srcIdx) => {
             const itemKey = String(item);
-            if (
-              itemKey in (mergedTree as Record<string, unknown>)
-            ) {
-              const itemIsMerged =
-                sourceMap.get(`${mergedPath}/${itemKey}`) === "both";
+            if (itemKey in (mergedTree as Record<string, unknown>)) {
+              const childMergedPath = `${mergedPath}/${itemKey}`;
+              const existingEntry = getLineageForPath(childMergedPath, nodeIdMap, provenance);
+              const itemIsMerged = existingEntry
+                ? existingEntry.sources.some((s) => (s.panel === "left" || s.panel === "right") && s.panel !== source)
+                : false;
               subscribeItemAndChildren(
-                `${mergedPath}/${itemKey}`,
+                childMergedPath,
                 `${sourcePath}/${srcIdx}`,
                 source,
                 item,
@@ -1924,85 +1194,61 @@
             }
           });
         } else {
-          // Original behavior: indices match 1:1
           value.forEach((item, idx) => {
             subscribeItemAndChildren(
               `${mergedPath}/${idx}`,
               `${sourcePath}/${idx}`,
               source,
               item,
-              false, // Children are NOT merged just because parent is
+              false,
               trackLineage,
             );
           });
         }
       } else {
-        Object.entries(value as Record<string, unknown>).forEach(
-          ([key, val]) => {
-            const mergedChild =
-              mergedTree &&
-              typeof mergedTree === "object" &&
-              !Array.isArray(mergedTree)
-                ? (mergedTree as Record<string, unknown>)[key]
-                : undefined;
-            subscribeItemAndChildren(
-              `${mergedPath}/${key}`,
-              `${sourcePath}/${key}`,
-              source,
-              val,
-              false, // Children are NOT merged just because parent is
-              trackLineage,
-              mergedChild,
-            );
-          },
-        );
+        Object.entries(value as Record<string, unknown>).forEach(([key, val]) => {
+          const mergedChild =
+            mergedTree && typeof mergedTree === "object" && !Array.isArray(mergedTree)
+              ? (mergedTree as Record<string, unknown>)[key]
+              : undefined;
+          subscribeItemAndChildren(
+            `${mergedPath}/${key}`,
+            `${sourcePath}/${key}`,
+            source,
+            val,
+            false,
+            trackLineage,
+            mergedChild,
+          );
+        });
       }
     }
-
-    mergedPathToId = new Map(mergedPathToId);
   }
 
   /**
-   * Unsubscribe a merged item and all its children from their sources.
-   * Also removes lineage entries for the item and children.
-   *
-   * @param mergedPath - Path of the item to unsubscribe
+   * Remove provenance for a merged item and all its children.
    */
   function unsubscribeItemAndChildren(mergedPath: string) {
-    const subscriberId = mergedPathToId.get(mergedPath);
-    if (subscriberId) {
-      unsubscribe(subscriberId);
-    }
-    mergedPathToId.delete(mergedPath);
-
-    // Also remove lineage
     removeLineage(mergedPath);
-
-    // Also unsubscribe children
+    // Also remove nodeIdMap entries
     const prefix = mergedPath + "/";
-    for (const [path, subId] of [...mergedPathToId.entries()]) {
+    const nodeId = nodeIdMap.get(mergedPath);
+    if (nodeId) provenance.delete(nodeId);
+    nodeIdMap.delete(mergedPath);
+    for (const [path] of [...nodeIdMap.entries()]) {
       if (path.startsWith(prefix)) {
-        unsubscribe(subId);
-        mergedPathToId.delete(path);
-        removeLineage(path);
+        const id = nodeIdMap.get(path);
+        if (id) provenance.delete(id);
+        nodeIdMap.delete(path);
       }
     }
-
-    mergedPathToId = new Map(mergedPathToId);
   }
 
   /**
-   * Mark a merged item's subscriptions as "merged" (combined from both sources).
-   * Only marks the specific item, not its children.
-   *
-   * @param mergedPath - Path of the item to mark as merged
+   * Mark a merged item's provenance as "merged" (combined from both sources).
    */
   function markItemAsMerged(mergedPath: string) {
-    const subscriberId = mergedPathToId.get(mergedPath);
-    if (subscriberId) {
-      markAsMerged(subscriberId);
-    }
-    // NOTE: We do NOT mark children - they should only be bold if they are individually merged
+    markLineageAsMerged(mergedPath);
   }
 
   /**
@@ -2035,8 +1281,6 @@
     } | null,
   ) {
     const sourcePanel = sourcePath[0];
-    const sourceKey = sourcePath[sourcePath.length - 1];
-
     // Don't allow dropping onto itself
     // For leaf merges, compare source path to mergeWithLeafItem.path (the actual target)
     const sourcePathStr = sourcePath.slice(1).join("/");
@@ -2066,36 +1310,19 @@
       targetPanel,
     );
 
-    // For leaf merges from merged panel, capture the source, lineage, and subscriptions BEFORE removing
+    // For leaf merges from merged panel, capture the provenance BEFORE removing
     let draggedSourceForLeafMerge: string | undefined;
     let draggedLineageForLeafMerge: LineageEntry | undefined;
-    let draggedSubscriberIdForLeafMerge: string | undefined;
-    let draggedInfosForLeafMerge:
-      | { sourceId: string; source: "left" | "right"; isMerged: boolean }[]
-      | undefined;
     if (mergeWithLeafItem && sourcePanel === "merged") {
       const draggedSourcePath = sourcePath.slice(1).join("/");
       draggedSourceForLeafMerge = sourceMap.get(draggedSourcePath);
-      draggedSubscriberIdForLeafMerge = mergedPathToId.get(draggedSourcePath);
-      if (draggedSubscriberIdForLeafMerge) {
-        const infos = subscriberInfo.get(draggedSubscriberIdForLeafMerge);
-        if (infos) {
-          draggedInfosForLeafMerge = infos.map((i) => ({ ...i }));
-        }
-      }
-      // CRITICAL: Capture lineage BEFORE it gets removed during reindexing
-      const draggedLineageEntry = lineage.get(draggedSourcePath);
+      // CRITICAL: Capture provenance BEFORE it gets removed during reindexing
+      const draggedLineageEntry = getLineageForPath(draggedSourcePath, nodeIdMap, provenance);
       if (draggedLineageEntry) {
-        // Deep copy to avoid mutation issues
         draggedLineageForLeafMerge = {
           sources: draggedLineageEntry.sources.map((s) => ({ ...s })),
         };
       }
-      console.log(
-        "Captured lineage for leaf merge:",
-        draggedSourcePath,
-        JSON.stringify(draggedLineageForLeafMerge),
-      );
     }
 
     // Remove from source - but only if dragging within the merged panel
@@ -2165,18 +1392,11 @@
           );
         }
       } else if (sourcePanel === "merged") {
-        // Cross-array or non-array item: clean up dragged item's entries
-        sourceMap.delete(draggedSourcePath);
-        removeLineage(draggedSourcePath);
-
-        // Clean up dragged subscriber mapping so it doesn't leave stale source styling
-        if (draggedSubscriberIdForLeafMerge) {
-          unsubscribe(draggedSubscriberIdForLeafMerge);
-          mergedPathToId.delete(draggedSourcePath);
-        }
+        // Cross-array or non-array item: clean up dragged item's provenance
+        unsubscribeItemAndChildren(draggedSourcePath);
 
         // NOTE: Children's stale entries are cleaned up AFTER the section merge
-        // and subscription logic below, so that new entries at target paths are
+        // and provenance logic below, so that new entries at target paths are
         // created before old entries at dragged paths are removed.
 
         // If the dragged item was an array item, reindex its former siblings
@@ -2193,8 +1413,6 @@
               draggedSourcePath,
             );
           }
-        } else {
-          mergedPathToId = new Map(mergedPathToId);
         }
       }
 
@@ -2299,31 +1517,12 @@
           targetParent[targetKey] = converted;
           sectionMergeTargetValue = converted;
 
-          // Remap old index-based sourceMap/subscription/lineage entries to key-based paths
+          // Remap old index-based nodeIdMap entries to key-based paths
           // since we converted the target from array to object
           for (let i = 0; i < targetValue.length; i++) {
             const oldPrefix = `${targetItemPath}/${i}`;
             const newPrefix = `${targetItemPath}/${String(targetValue[i])}`;
-
-            // Remap exact match and any nested children
-            for (const [path, src] of [...sourceMap.entries()]) {
-              if (path === oldPrefix || path.startsWith(oldPrefix + "/")) {
-                sourceMap.delete(path);
-                sourceMap.set(path.replace(oldPrefix, newPrefix), src);
-              }
-            }
-            for (const [path, subId] of [...mergedPathToId.entries()]) {
-              if (path === oldPrefix || path.startsWith(oldPrefix + "/")) {
-                mergedPathToId.delete(path);
-                mergedPathToId.set(path.replace(oldPrefix, newPrefix), subId);
-              }
-            }
-            for (const [path, lin] of [...lineage.entries()]) {
-              if (path === oldPrefix || path.startsWith(oldPrefix + "/")) {
-                lineage.delete(path);
-                lineage.set(path.replace(oldPrefix, newPrefix), lin);
-              }
-            }
+            nodeIdMap = remapNodeIdPaths(nodeIdMap, oldPrefix, newPrefix);
           }
         } else if (
           typeof targetValue === "object" &&
@@ -2342,25 +1541,9 @@
         }
       }
 
+      // sourceMap is derived from provenance — use it directly
       const targetSource = sourceMap.get(targetItemPath);
-
-      // Also check if target has subscriptions - if so, we can infer its source
-      let inferredTargetSource = targetSource;
-      if (!inferredTargetSource) {
-        const targetSubscriberId = mergedPathToId.get(targetItemPath);
-        if (targetSubscriberId) {
-          const targetInfos = subscriberInfo.get(targetSubscriberId);
-          if (targetInfos && targetInfos.length > 0) {
-            // Infer source from subscriptions
-            const sources = new Set(targetInfos.map((i) => i.source));
-            if (sources.size === 1) {
-              inferredTargetSource = [...sources][0];
-            } else if (sources.size > 1) {
-              inferredTargetSource = "both";
-            }
-          }
-        }
-      }
+      const inferredTargetSource = targetSource || deriveSource(getLineageForPath(targetItemPath, nodeIdMap, provenance));
 
       console.log(
         "Dragged source:",
@@ -2372,7 +1555,6 @@
         "Target path:",
         targetItemPath,
       );
-      console.log("All sourceMap entries:", [...sourceMap.entries()]);
 
       // Determine the merged source - use inferred source for better accuracy
       let mergedSource = "both";
@@ -2392,64 +1574,19 @@
         mergedSource = effectiveTargetSource;
       }
 
-      // Mark the target item as merged (it stays, dragged item is deleted)
-      console.log("Setting sourceMap for", targetItemPath, "to", mergedSource);
-      console.log("sourceMap before update:", [...sourceMap.entries()]);
-      sourceMap.set(targetItemPath, mergedSource);
-
-      // For section merges, also set sourceMap for the dragged item's children
-      // using merge-aware index mapping (handles dedup/concat correctly)
-      if (sectionMergeTargetValue !== undefined) {
-        recordSource(
-          targetItemPath,
-          value,
-          draggedSource === "left" ||
-            draggedSource === "right" ||
-            draggedSource === "both"
-            ? draggedSource
-            : "both",
-          sectionMergeTargetValue,
-        );
+      // Record provenance for the leaf merge
+      // Ensure nodeIdMap entry exists for target
+      if (!nodeIdMap.has(targetItemPath)) {
+        nodeIdMap.set(targetItemPath, generateNodeId());
       }
 
-      sourceMap = new Map(sourceMap);
-      console.log("sourceMap after update:", [...sourceMap.entries()]);
-
-      // PUB/SUB: Subscribe the merged item to the dragged source
       if (sourcePanel === "left" || sourcePanel === "right") {
         const originalDraggedPath = sourcePath.slice(1).join("/");
         const isMerged = mergedSource === "both";
-        console.log(
-          "Subscribing dragged item:",
-          originalDraggedPath,
-          sourcePanel,
-          "isMerged:",
-          isMerged,
-        );
-        console.log(
-          "Target subscriberId lookup:",
-          mergedPathToId.get(targetItemPath),
-        );
-        console.log(
-          "Target subscriber info:",
-          subscriberInfo.get(mergedPathToId.get(targetItemPath) || ""),
-        );
 
-        // If this is a true merge (different sources), mark existing lineage as merged
+        // If this is a true merge, mark existing provenance as merged
         if (isMerged) {
-          console.log(
-            "LEAF MERGE: Before markLineageAsMerged, lineage for",
-            targetItemPath,
-            ":",
-            JSON.stringify(lineage.get(targetItemPath)),
-          );
           markLineageAsMerged(targetItemPath);
-          console.log(
-            "LEAF MERGE: After markLineageAsMerged, lineage for",
-            targetItemPath,
-            ":",
-            JSON.stringify(lineage.get(targetItemPath)),
-          );
         }
 
         subscribeItemAndChildren(
@@ -2458,116 +1595,13 @@
           sourcePanel as "left" | "right",
           value,
           isMerged,
-          true, // trackLineage
-          sectionMergeTargetValue, // merged tree for correct array index mapping in section merges
+          true,
+          sectionMergeTargetValue,
         );
-
-        console.log(
-          "LEAF MERGE: After subscribeItemAndChildren, lineage for",
-          targetItemPath,
-          ":",
-          JSON.stringify(lineage.get(targetItemPath)),
-        );
-
-        // Debug: Log final subscription state
-        const finalSubscriberId = mergedPathToId.get(targetItemPath);
-        console.log("After subscribe - subscriberId:", finalSubscriberId);
-        console.log(
-          "After subscribe - subscriberInfo:",
-          subscriberInfo.get(finalSubscriberId || ""),
-        );
-      } else if (sourcePanel === "merged" && mergedSource === "both") {
-        // Dragging within merged panel - transfer the dragged item's subscriptions to target
-        const draggedMergedPath = sourcePath.slice(1).join("/");
-        const draggedSubscriberId =
-          draggedSubscriberIdForLeafMerge ||
-          mergedPathToId.get(draggedMergedPath);
-        const draggedInfos =
-          draggedInfosForLeafMerge ||
-          (draggedSubscriberId
-            ? subscriberInfo.get(draggedSubscriberId)
-            : undefined);
-        const targetSubscriberId = mergedPathToId.get(targetItemPath);
-
-        console.log(
-          "Merged panel leaf merge - draggedPath:",
-          draggedMergedPath,
-          "targetPath:",
-          targetItemPath,
-        );
-        console.log(
-          "Dragged subscriberId:",
-          draggedSubscriberId,
-          "Target subscriberId:",
-          targetSubscriberId,
-        );
-
-        if (draggedInfos && draggedInfos.length > 0) {
-          // Get or create target subscriber ID
-          let actualTargetSubscriberId = targetSubscriberId;
-          if (!actualTargetSubscriberId) {
-            actualTargetSubscriberId = generateId();
-            mergedPathToId.set(targetItemPath, actualTargetSubscriberId);
-          }
-
-          // Copy each subscription from dragged to target
-          for (const info of draggedInfos) {
-            subscribe(
-              actualTargetSubscriberId,
-              info.sourceId,
-              info.source,
-              true,
-            );
-          }
-
-          console.log(
-            "After transfer - target subscriberInfo:",
-            subscriberInfo.get(actualTargetSubscriberId),
-          );
-
-          // Clean up dragged item's old subscriber mapping if it still exists
-          if (
-            draggedSubscriberId &&
-            draggedSubscriberId !== actualTargetSubscriberId
-          ) {
-            unsubscribe(draggedSubscriberId);
-            mergedPathToId.delete(draggedMergedPath);
-          }
-          mergedPathToId.set(targetItemPath, actualTargetSubscriberId);
-          mergedPathToId = new Map(mergedPathToId);
-        }
-
-        // If both items came from same source but target wasn't marked as merged yet, ensure status is updated
-        if (draggedInfos && draggedInfos.length > 0) {
-          const targetSubId = mergedPathToId.get(targetItemPath);
-          if (targetSubId) {
-            const targetInfos = subscriberInfo.get(targetSubId);
-            if (targetInfos && targetInfos.length > 1) {
-              markAsMerged(targetSubId);
-            }
-          }
-        }
-
-        if (draggedSubscriberIdForLeafMerge && !draggedInfosForLeafMerge) {
-          // Defensive cleanup for stale state: remove orphaned dragged subscriber
-          unsubscribe(draggedSubscriberIdForLeafMerge);
-          mergedPathToId.delete(draggedMergedPath);
-          mergedPathToId = new Map(mergedPathToId);
-        }
-
-        // Transfer lineage from dragged item to target
-        // Use the pre-captured lineage since the original was removed during reindexing
+      } else if (sourcePanel === "merged") {
+        // Transfer pre-captured lineage from dragged item to target
         const draggedLineage = draggedLineageForLeafMerge;
-        console.log(
-          "Lineage transfer - using pre-captured lineage, found:",
-          !!draggedLineage,
-        );
         if (draggedLineage) {
-          console.log(
-            "Lineage transfer - dragged sources:",
-            JSON.stringify(draggedLineage.sources),
-          );
-          // Mark target's existing lineage as merged and add dragged sources
           markLineageAsMerged(targetItemPath);
           for (const source of draggedLineage.sources) {
             addLineage(
@@ -2577,51 +1611,28 @@
               "merged",
             );
           }
-        } else {
-          console.log("Lineage transfer - NO pre-captured lineage available!");
         }
       }
 
-      // PUB/SUB: If this is a true merge, mark the target's subscriptions as merged too
+      // If this is a true merge, mark the target's provenance as merged
       if (
         mergedSource === "both" &&
         effectiveTargetSource &&
         effectiveTargetSource !== "both"
       ) {
-        console.log(
-          "Marking target as merged:",
-          targetItemPath,
-          effectiveTargetSource,
-        );
         markItemAsMerged(targetItemPath);
-
-        // Debug: Log state after markItemAsMerged
-        const subscriberId = mergedPathToId.get(targetItemPath);
-        console.log(
-          "After markItemAsMerged - subscriberInfo:",
-          subscriberInfo.get(subscriberId || ""),
-        );
       }
 
-      // Deferred cleanup: now that section merge, recordSource, and
-      // subscribeItemAndChildren have run, remove stale entries that are
-      // still under the old dragged path (they have been re-created at
-      // the target path by the logic above).
+      // Deferred cleanup: remove stale entries under the old dragged path
       if (sourcePanel === "merged") {
         const draggedPrefix = draggedSourcePath + "/";
-        for (const [path] of [...sourceMap.entries()]) {
+        for (const [path] of [...nodeIdMap.entries()]) {
           if (path.startsWith(draggedPrefix)) {
-            sourceMap.delete(path);
+            const id = nodeIdMap.get(path);
+            if (id) provenance.delete(id);
+            nodeIdMap.delete(path);
           }
         }
-        for (const [path, subId] of [...mergedPathToId.entries()]) {
-          if (path.startsWith(draggedPrefix)) {
-            unsubscribe(subId);
-            mergedPathToId.delete(path);
-            removeLineage(path);
-          }
-        }
-        mergedPathToId = new Map(mergedPathToId);
       }
 
       // Trigger reactivity and return
@@ -2691,34 +1702,15 @@
           const targetPathStr = targetPath.join("/");
           const draggedSource = sourcePanel as "left" | "right";
 
-          // Get the current source of the target section
-          const targetSource = sourceMap.get(targetPathStr);
-
-          // If different sources, mark as "both"
-          if (
-            (targetSource === "left" && draggedSource === "right") ||
-            (targetSource === "right" && draggedSource === "left") ||
-            targetSource === "both"
-          ) {
-            sourceMap.set(targetPathStr, "both");
-          } else if (!targetSource && draggedSource) {
-            sourceMap.set(targetPathStr, draggedSource);
-          }
-          sourceMap = new Map(sourceMap);
-
-          // PUB/SUB: Subscribe the section header to the leaf concept's source
+          // Record provenance for the header-merged action
           const originalPath = sourcePath.slice(1).join("/");
-          const isMerged = sourceMap.get(targetPathStr) === "both";
-          subscribeItemAndChildren(
-            targetPathStr,
-            originalPath,
-            sourcePanel,
-            null, // No children to subscribe
-            isMerged,
-            false, // Don't auto-track lineage, we'll do it manually with header-merged action
-          );
+          const targetSource = sourceMap.get(targetPathStr);
+          const isMerged =
+            (targetSource === "left" && (draggedSource as string) === "right") ||
+            (targetSource === "right" && (draggedSource as string) === "left") ||
+            targetSource === "both";
 
-          // Track lineage with header-merged action
+          // Track provenance with header-merged action
           addLineage(targetPathStr, sourcePanel, originalPath, "header-merged");
 
           if (isMerged) {
@@ -2936,7 +1928,7 @@
                   draggedSource === "both"
                 ) {
                   recordSource(addedPathStr, value, draggedSource);
-                  sourceMap = new Map(sourceMap);
+  
 
                   // Subscribe the added section to its source
                   if (draggedSource === "left" || draggedSource === "right") {
@@ -2964,66 +1956,8 @@
                 );
 
                 // Determine if this is a true merge (different sources)
-                if (
-                  (targetSource === "left" && draggedSource === "right") ||
-                  (targetSource === "right" && draggedSource === "left") ||
-                  targetSource === "both" ||
-                  draggedSource === "both"
-                ) {
-                  // Mark the target section as "both" (merged from different sources)
-                  sourceMap.set(targetPathStr, "both");
-                } else if (!targetSource && draggedSource) {
-                  // Target has no source yet, use the dragged source
-                  sourceMap.set(targetPathStr, draggedSource);
-                }
-                // If both are same source, target keeps its source
-
-                // Record source for absorbed content using dragged source
-                const childSource = draggedSource;
-                console.log("Child source determined as:", childSource);
-
-                if (
-                  childSource === "left" ||
-                  childSource === "right" ||
-                  childSource === "both"
-                ) {
-                  if (Array.isArray(value)) {
-                    // For array value, record source for the key and its array items
-                    const childPath = `${targetPathStr}/${key}`;
-                    console.log(
-                      "Recording source for array item:",
-                      childPath,
-                      "as:",
-                      childSource,
-                    );
-                    // Pass merged tree so array indices map correctly after dedup/concat
-                    recordSource(childPath, value, childSource, targetObj[key]);
-                  } else {
-                    // For object value, record source for each child
-                    // Pass the merged child so array indices map correctly
-                    const draggedChildren = value as Record<string, unknown>;
-                    for (const [childKey, childValue] of Object.entries(
-                      draggedChildren,
-                    )) {
-                      const childPath = `${targetPathStr}/${childKey}`;
-                      console.log(
-                        "Recording source for child:",
-                        childPath,
-                        "as:",
-                        childSource,
-                      );
-                      recordSource(
-                        childPath,
-                        childValue,
-                        childSource,
-                        targetObj[childKey],
-                      );
-                    }
-                  }
-                }
-
-                sourceMap = new Map(sourceMap);
-                console.log("sourceMap after merge:", [...sourceMap.entries()]);
+                // Provenance for the section merge will be recorded by subscribeItemAndChildren below.
+                // sourceMap is derived automatically from provenance.
 
                 // PUB/SUB: Subscribe the merged item to the dragged source
                 if (
@@ -3040,26 +1974,10 @@
                   // For object value: addedPath = [...targetPath] (children merged into target)
                   const subscriptionPath = addedPath.join("/");
 
-                  // If dragging from merged panel, source merged node was removed from data above;
-                  // cleanup old subscriber/lineage mappings to prevent stale source styling.
+                  // If dragging from merged panel, cleanup old provenance mappings
                   if (sourcePanel === "merged") {
                     const sourceMergedPath = sourcePath.slice(1).join("/");
-                    const sourceSubscriberId =
-                      mergedPathToId.get(sourceMergedPath);
-                    if (sourceSubscriberId) {
-                      unsubscribe(sourceSubscriberId);
-                    }
-                    mergedPathToId.delete(sourceMergedPath);
-                    removeLineage(sourceMergedPath);
-                    const sourcePrefix = sourceMergedPath + "/";
-                    for (const [path, subId] of [...mergedPathToId.entries()]) {
-                      if (path.startsWith(sourcePrefix)) {
-                        unsubscribe(subId);
-                        mergedPathToId.delete(path);
-                        removeLineage(path);
-                      }
-                    }
-                    mergedPathToId = new Map(mergedPathToId);
+                    unsubscribeItemAndChildren(sourceMergedPath);
                   }
 
                   // Pass merged tree so array indices map correctly after dedup/concat
@@ -3202,24 +2120,10 @@
                 );
               }
 
-              // Cleanup stale merged-path subscriptions for dragged merged subtree before re-subscribing
+              // Cleanup stale provenance for dragged merged subtree before re-subscribing
               if (sourcePanel === "merged") {
                 const sourceMergedPath = sourcePath.slice(1).join("/");
-                const sourceSubscriberId = mergedPathToId.get(sourceMergedPath);
-                if (sourceSubscriberId) {
-                  unsubscribe(sourceSubscriberId);
-                }
-                mergedPathToId.delete(sourceMergedPath);
-                removeLineage(sourceMergedPath);
-                const sourcePrefix = sourceMergedPath + "/";
-                for (const [path, subId] of [...mergedPathToId.entries()]) {
-                  if (path.startsWith(sourcePrefix)) {
-                    unsubscribe(subId);
-                    mergedPathToId.delete(path);
-                    removeLineage(path);
-                  }
-                }
-                mergedPathToId = new Map(mergedPathToId);
+                unsubscribeItemAndChildren(sourceMergedPath);
               }
 
               // Get the source of the target array
@@ -3231,38 +2135,10 @@
                 draggedSource,
               );
 
-              // Determine if this is a true merge (different sources)
-              if (
-                (targetSource === "left" && draggedSource === "right") ||
-                (targetSource === "right" && draggedSource === "left") ||
-                targetSource === "both" ||
-                draggedSource === "both"
-              ) {
-                // Mark the target array as "both" (merged from different sources)
-                sourceMap.set(targetPathStr, "both");
-              } else if (!targetSource && draggedSource) {
-                sourceMap.set(targetPathStr, draggedSource);
-              }
+              // Provenance for array items is recorded by subscribeItemAndChildren below.
+              // sourceMap is derived automatically from provenance.
 
-              // Record source for each new array item using dragged source
-              const childSource = draggedSource;
-              if (
-                childSource === "left" ||
-                childSource === "right" ||
-                childSource === "both"
-              ) {
-                // The items are now at indices in the target array
-                // We need to record the source for each item
-                for (let i = 0; i < targetObj.length; i++) {
-                  const itemPath = `${targetPathStr}/${i}`;
-                  // Only set source for items that don't have one yet
-                  if (!sourceMap.has(itemPath)) {
-                    sourceMap.set(itemPath, childSource);
-                  }
-                }
-              }
-
-              sourceMap = new Map(sourceMap);
+      
 
               // PUB/SUB: Subscribe each added item to its source
               // We need to use the CORRECT indices: targetIndex in merged, sourceIndex in source panel
@@ -3379,7 +2255,7 @@
 
               const addedPathStr = addedPath.join("/");
               recordSource(addedPathStr, value, draggedSource);
-              sourceMap = new Map(sourceMap);
+      
 
               // PUB/SUB: Subscribe the added section and its children
               if (draggedSource === "left" || draggedSource === "right") {
@@ -3481,7 +2357,7 @@
         } else {
           recordSource(itemPath, value, sourceToRecord);
         }
-        sourceMap = new Map(sourceMap);
+
 
         // PUB/SUB: Subscribe the merged item to its source
         if (sourcePanel === "left" || sourcePanel === "right") {
@@ -3513,7 +2389,7 @@
       }
     }
 
-    // If moving within merged panel, update path mappings (sourceMap and mergedPathToId)
+    // If moving within merged panel, update path mappings (sourceMap and nodeIdMap)
     if (sourcePanel === "merged" && targetPanel === "merged") {
       const oldPath = sourcePath.slice(1).join("/");
       const newPath = addedPath.join("/");
@@ -3521,36 +2397,8 @@
       if (oldPath !== newPath) {
         console.log("Moving within merged panel:", oldPath, "->", newPath);
 
-        // Update sourceMap entries for this item and all children
-        const newSourceMap = new Map<string, string>();
-        for (const [path, source] of sourceMap.entries()) {
-          if (path === oldPath) {
-            newSourceMap.set(newPath, source);
-          } else if (path.startsWith(oldPath + "/")) {
-            const suffix = path.slice(oldPath.length);
-            newSourceMap.set(newPath + suffix, source);
-          } else {
-            newSourceMap.set(path, source);
-          }
-        }
-        sourceMap = newSourceMap;
-
-        // Update mergedPathToId entries for this item and all children
-        const newMergedPathToId = new Map<string, string>();
-        for (const [path, id] of mergedPathToId.entries()) {
-          if (path === oldPath) {
-            newMergedPathToId.set(newPath, id);
-          } else if (path.startsWith(oldPath + "/")) {
-            const suffix = path.slice(oldPath.length);
-            newMergedPathToId.set(newPath + suffix, id);
-          } else {
-            newMergedPathToId.set(path, id);
-          }
-        }
-        mergedPathToId = newMergedPathToId;
-
-        // Update lineage paths
-        updateLineagePath(oldPath, newPath);
+        // Update nodeIdMap entries (sourceMap is derived automatically)
+        nodeIdMap = remapNodeIdPaths(nodeIdMap, oldPath, newPath);
       }
     }
 
@@ -3592,204 +2440,26 @@
     }
   }
 
-  /**
-   * Record the source panel for an item and all its descendants in sourceMap.
-   * If a path already has a different source, marks it as "both" (merged).
-   *
-   * @param basePath - Path to record source for
-   * @param value - Value/subtree to recursively process
-   * @param source - Source panel ("left", "right", or "both")
-   */
+  // recordSource and recordSourceForMergedSection are no longer needed.
+  // sourceMap is now $derived from provenance. These are kept as no-ops
+  // for backward compat with existing call sites in handleDrop.
   function recordSource(
-    basePath: string,
-    value: unknown,
-    source: string,
-    mergedTree?: unknown, // When provided, use actual merged state for correct array index mapping
+    _basePath: string,
+    _value: unknown,
+    _source: string,
+    _mergedTree?: unknown,
   ) {
-    // Check if this path already has a different source - if so, merge to "both"
-    const existingSource = sourceMap.get(basePath);
-    let newSource = source;
-    if (existingSource && existingSource !== source) {
-      // Different sources = merged from both
-      newSource = "both";
-    } else if (existingSource === "both") {
-      // Already merged, keep as both
-      newSource = "both";
-    }
-
-    // Record this path
-    sourceMap.set(basePath, newSource);
-
-    // Recursively record children
-    if (value && typeof value === "object") {
-      if (Array.isArray(value)) {
-        if (mergedTree && Array.isArray(mergedTree)) {
-          // Merge-aware: map each source item to its actual index in the merged array.
-          // After addToData dedup/concat, dragged index N may not correspond to merged index N.
-          value.forEach((item) => {
-            const mergedIdx = (mergedTree as unknown[]).findIndex(
-              (ex) =>
-                typeof ex === typeof item && String(ex) === String(item),
-            );
-            if (mergedIdx !== -1) {
-              recordSource(
-                `${basePath}/${mergedIdx}`,
-                item,
-                source,
-                (mergedTree as unknown[])[mergedIdx],
-              );
-            }
-          });
-        } else if (
-          mergedTree &&
-          typeof mergedTree === "object" &&
-          !Array.isArray(mergedTree)
-        ) {
-          // Array value merged into object target: map each array item to its key in the merged object
-          value.forEach((item) => {
-            const itemKey = String(item);
-            if (
-              itemKey in (mergedTree as Record<string, unknown>)
-            ) {
-              recordSource(
-                `${basePath}/${itemKey}`,
-                item,
-                source,
-                (mergedTree as Record<string, unknown>)[itemKey],
-              );
-            }
-          });
-        } else {
-          // Original behavior: indices match 1:1
-          value.forEach((item, idx) => {
-            recordSource(`${basePath}/${idx}`, item, source);
-          });
-        }
-      } else {
-        Object.entries(value as Record<string, unknown>).forEach(
-          ([key, val]) => {
-            const mergedChild =
-              mergedTree &&
-              typeof mergedTree === "object" &&
-              !Array.isArray(mergedTree)
-                ? (mergedTree as Record<string, unknown>)[key]
-                : undefined;
-            recordSource(`${basePath}/${key}`, val, source, mergedChild);
-          },
-        );
-      }
-    }
+    // No-op: sourceMap is derived from provenance
   }
 
-  /**
-   * Record source for a merged section.
-   * Marks the parent as "both" but children keep their original source.
-   * Used when dropping a section from one source onto a section from another.
-   *
-   * @param basePath - Path of the merged section
-   * @param value - Value/subtree of the incoming section
-   * @param source - Source panel of the incoming section
-   */
   function recordSourceForMergedSection(
-    basePath: string,
-    value: unknown,
-    source: string,
-    mergedTree?: unknown, // When provided, use actual merged state for correct array index mapping
+    _basePath: string,
+    _value: unknown,
+    _source: string,
+    _mergedTree?: unknown,
   ) {
-    // For merged sections: mark the parent as "both" but children keep their original source
-    // This is used when dropping a red section onto a blue section (or vice versa)
-
-    // Always mark the section itself as "both" since it now contains items from both sources
-    sourceMap.set(basePath, "both");
-
-    // Recursively record children with their original source (not "both")
-    // Only record children that don't already have a source (new items from the incoming section)
-    if (value && typeof value === "object") {
-      if (Array.isArray(value)) {
-        if (mergedTree && Array.isArray(mergedTree)) {
-          // Merge-aware: map each source item to its actual index in the merged array
-          value.forEach((item) => {
-            const mergedIdx = (mergedTree as unknown[]).findIndex(
-              (ex) =>
-                typeof ex === typeof item && String(ex) === String(item),
-            );
-            if (mergedIdx === -1) return;
-            const childPath = `${basePath}/${mergedIdx}`;
-            if (!sourceMap.has(childPath)) {
-              recordSource(
-                childPath,
-                item,
-                source,
-                (mergedTree as unknown[])[mergedIdx],
-              );
-            } else {
-              const existingSource = sourceMap.get(childPath);
-              if (
-                existingSource &&
-                existingSource !== source &&
-                existingSource !== "both"
-              ) {
-                sourceMap.set(childPath, "both");
-              }
-            }
-          });
-        } else {
-          // Original behavior: indices match 1:1
-          value.forEach((item, idx) => {
-            const childPath = `${basePath}/${idx}`;
-            if (!sourceMap.has(childPath)) {
-              recordSource(childPath, item, source);
-            } else {
-              const existingSource = sourceMap.get(childPath);
-              if (
-                existingSource &&
-                existingSource !== source &&
-                existingSource !== "both"
-              ) {
-                sourceMap.set(childPath, "both");
-              }
-            }
-          });
-        }
-      } else {
-        Object.entries(value as Record<string, unknown>).forEach(
-          ([key, val]) => {
-            const childPath = `${basePath}/${key}`;
-            const mergedChild =
-              mergedTree &&
-              typeof mergedTree === "object" &&
-              !Array.isArray(mergedTree)
-                ? (mergedTree as Record<string, unknown>)[key]
-                : undefined;
-            // Only set source for items that don't already have one
-            if (!sourceMap.has(childPath)) {
-              recordSource(childPath, val, source, mergedChild);
-            }
-            // If it already exists with a different source, it's a sub-section merge
-            else {
-              const existingSource = sourceMap.get(childPath);
-              if (
-                existingSource &&
-                existingSource !== source &&
-                existingSource !== "both"
-              ) {
-                // Recursively handle as a merged section
-                recordSourceForMergedSection(
-                  childPath,
-                  val,
-                  source,
-                  mergedChild,
-                );
-              }
-            }
-          },
-        );
-      }
-    }
+    // No-op: sourceMap is derived from provenance
   }
-
-  // Usage tracking is now derived from sourceMap automatically via $derived
-  // No manual updateUsage or markAsMerged functions needed
 
   /**
    * Add an item to a data tree at the specified path.
@@ -4001,7 +2671,7 @@
 
   /**
    * Handle renaming an item in any panel.
-   * Updates the data tree, sourceMap, mergedPathToId, and lineage as needed.
+   * Updates the data tree, sourceMap, nodeIdMap, and lineage as needed.
    *
    * @param path - Full path including panel ID
    * @param oldName - Original name/value
@@ -4010,7 +2680,7 @@
    */
   function handleRename(
     path: string[],
-    oldName: string,
+    _oldName: string,
     newName: string,
     isArrayItem: boolean,
   ) {
@@ -4067,42 +2737,14 @@
           parent[k] = v;
         }
 
-        // Update sourceMap and mergedPathToId for the renamed item and its children
+        // Update sourceMap and nodeIdMap for the renamed item and its children
         if (panelId === "merged") {
           const oldPathPrefix = itemPath.join("/");
           const newPathPrefix = [...itemPath.slice(0, -1), newName].join("/");
 
           if (oldPathPrefix !== newPathPrefix) {
-            // Update sourceMap
-            const newSourceMap = new Map<string, string>();
-            for (const [path, source] of sourceMap.entries()) {
-              if (path === oldPathPrefix) {
-                newSourceMap.set(newPathPrefix, source);
-              } else if (path.startsWith(oldPathPrefix + "/")) {
-                const suffix = path.slice(oldPathPrefix.length);
-                newSourceMap.set(newPathPrefix + suffix, source);
-              } else {
-                newSourceMap.set(path, source);
-              }
-            }
-            sourceMap = newSourceMap;
-
-            // Update mergedPathToId
-            const newMergedPathToId = new Map<string, string>();
-            for (const [path, id] of mergedPathToId.entries()) {
-              if (path === oldPathPrefix) {
-                newMergedPathToId.set(newPathPrefix, id);
-              } else if (path.startsWith(oldPathPrefix + "/")) {
-                const suffix = path.slice(oldPathPrefix.length);
-                newMergedPathToId.set(newPathPrefix + suffix, id);
-              } else {
-                newMergedPathToId.set(path, id);
-              }
-            }
-            mergedPathToId = newMergedPathToId;
-
-            // Update lineage
-            updateLineagePath(oldPathPrefix, newPathPrefix);
+            // Update nodeIdMap (sourceMap is derived automatically)
+            nodeIdMap = remapNodeIdPaths(nodeIdMap, oldPathPrefix, newPathPrefix);
           }
         }
       }
@@ -4127,16 +2769,12 @@
     // Add a new empty section to the merged data
     mergedData[name] = {};
 
-    // Track lineage for user-created section
-    lineage.set(name, {
-      sources: [
-        {
-          panel: "user",
-          originalPath: name,
-          action: "created",
-        },
-      ],
-    });
+    // Track provenance for user-created section
+    const sectionNodeId = generateNodeId();
+    nodeIdMap.set(name, sectionNodeId);
+    setProvenance(provenance, sectionNodeId, [
+      { panel: "user", originalPath: name, action: "created" },
+    ]);
 
     mergedData = { ...mergedData };
   }
@@ -4192,7 +2830,7 @@
         for (const key of keysToDelete) {
           sourceMap.delete(key);
         }
-        sourceMap = new Map(sourceMap);
+
       }
     }
 
@@ -4271,8 +2909,8 @@
       return;
     }
 
-    // Read directly from the lineage map
-    const entry = lineage.get(pathStr);
+    // Read from provenance via nodeIdMap
+    const entry = getLineageForPath(pathStr, nodeIdMap, provenance);
     console.log(
       "handleLineageHover: entry found:",
       !!entry,
@@ -4364,39 +3002,26 @@
       return;
     }
 
-    // Look up which merged items subscribe to this source
-    const subscribers = subscriptions.get(sourceId);
-    console.log(
-      "handleSourceHover: sourceId:",
-      sourceId,
-      "subscribers:",
-      subscribers?.size || 0,
-    );
+    // Reverse-lookup: find merged paths whose provenance references this source path
+    for (const [mergedPath, nodeId] of nodeIdMap.entries()) {
+      const entry = provenance.get(nodeId);
+      if (!entry) continue;
+      const match = entry.sources.some(
+        (s) => s.panel === panel && s.originalPath === pathStr,
+      );
+      if (match) {
+        highlightedMergedPath = mergedPath;
+        console.log(
+          "handleSourceHover: highlighting merged path:",
+          mergedPath,
+        );
 
-    if (!subscribers || subscribers.size === 0) {
-      highlightedMergedPath = null;
-      return;
-    }
-
-    // Find the merged path(s) for the subscriber(s)
-    // We'll highlight the first one and scroll to it
-    for (const subscriberId of subscribers) {
-      // Find the path for this subscriber ID in mergedPathToId
-      for (const [mergedPath, id] of mergedPathToId.entries()) {
-        if (id === subscriberId) {
-          highlightedMergedPath = mergedPath;
-          console.log(
-            "handleSourceHover: highlighting merged path:",
-            mergedPath,
-          );
-
-          // Scroll to the item in merged panel
-          const mergedTreeView = treeViewRefs["merged"];
-          if (mergedTreeView) {
-            mergedTreeView.scrollToPath(mergedPath);
-          }
-          return;
+        // Scroll to the item in merged panel
+        const mergedTreeView = treeViewRefs["merged"];
+        if (mergedTreeView) {
+          mergedTreeView.scrollToPath(mergedPath);
         }
+        return;
       }
     }
 
