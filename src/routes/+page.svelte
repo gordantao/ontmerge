@@ -1253,7 +1253,7 @@
 
   /**
    * Handle a drag-and-drop operation between panels.
-   * Manages moving/copying items, merging, subscriptions, lineage, and sourceMap updates.
+   * Manages moving/copying items, merging, provenance, and nodeIdMap updates.
    *
    * @param targetPanel - Panel being dropped onto ("left", "right", "merged")
    * @param targetPath - Path in target panel where item is dropped
@@ -2735,31 +2735,19 @@
     // Use removeFromData to delete the item
     removeFromData(dataObj, itemPath);
 
-    // Also update sourceMap and subscriptions if it's the merged panel
+    // Clean up provenance and reindex if it's the merged panel
     if (panelId === "merged") {
       const pathKey = itemPath.join("/");
 
-      // PUB/SUB: Unsubscribe this item and its children from their sources
+      // Remove provenance for this item and its children
       console.log("Deleting item - unsubscribing:", pathKey);
       unsubscribeItemAndChildren(pathKey);
 
-      // If this was an array item, we need to reindex all subsequent items
+      // If this was an array item, reindex all subsequent items
       if (isArrayItem && itemPath.length > 0) {
         const deletedIndex = parseInt(itemPath[itemPath.length - 1], 10);
         const parentPath = itemPath.slice(0, -1).join("/");
         reindexMergedArrayAfterDelete(parentPath, deletedIndex, pathKey);
-      } else {
-        // Not an array item, just remove this item and children
-        const keysToDelete: string[] = [];
-        for (const key of sourceMap.keys()) {
-          if (key === pathKey || key.startsWith(pathKey + "/")) {
-            keysToDelete.push(key);
-          }
-        }
-        for (const key of keysToDelete) {
-          sourceMap.delete(key);
-        }
-
       }
     }
 
@@ -2896,7 +2884,7 @@
 
   /**
    * Handle shift+hover on a source panel item to highlight its destination.
-   * Uses subscriptions to find merged items that use this source.
+   * Uses provenance to find merged items that reference this source.
    *
    * @param panel - Which source panel ("left" or "right")
    * @param path - Path segments of the hovered source item
