@@ -218,6 +218,73 @@
     nodeIdMap = reindexNodeIdsAfterInsert(nodeIdMap, parentPath, insertedIndex);
   }
 
+  /**
+   * Recalculate a parent node's provenance to reflect the panels present
+   * among its children. Called after moving leaves between subconcepts.
+   *
+   * - If children now span both panels → ensure parent has sources from both (shows "both"/purple)
+   * - If children are all from one panel → remove the other panel's source (shows "left"/"right")
+   * - Walks up the tree to update ancestors too.
+   */
+  function updateParentProvenance(parentPath: string) {
+    if (!parentPath) return;
+    const parentNodeId = nodeIdMap.get(parentPath);
+    if (!parentNodeId) return;
+    const parentEntry = provenance.get(parentNodeId);
+    if (!parentEntry) return;
+
+    // Collect which panels are present in children
+    const childPrefix = parentPath + "/";
+    const childPanels = new Set<string>();
+    for (const [path, nodeId] of nodeIdMap) {
+      if (path.startsWith(childPrefix)) {
+        const entry = provenance.get(nodeId);
+        if (entry) {
+          for (const s of entry.sources) {
+            if (s.panel === "left" || s.panel === "right") {
+              childPanels.add(s.panel);
+            }
+          }
+        }
+      }
+    }
+
+    // Rebuild the parent's left/right sources to match children
+    // Keep non-left/right sources (user, llm) untouched
+    const nonPanelSources = parentEntry.sources.filter(
+      (s) => s.panel !== "left" && s.panel !== "right",
+    );
+    const panelSources = parentEntry.sources.filter(
+      (s) => s.panel === "left" || s.panel === "right",
+    );
+
+    // For each panel present in children, ensure a source exists
+    const newPanelSources: typeof panelSources = [];
+    for (const panel of childPanels) {
+      // Reuse existing source entry for this panel if available
+      const existing = panelSources.find((s) => s.panel === panel);
+      if (existing) {
+        existing.action = childPanels.size >= 2 ? "merged" : "added";
+        newPanelSources.push(existing);
+      } else {
+        // Create a new source entry — use parent path as originalPath
+        newPanelSources.push({
+          panel: panel as "left" | "right",
+          originalPath: parentPath,
+          action: childPanels.size >= 2 ? "merged" : "added",
+        });
+      }
+    }
+
+    parentEntry.sources = [...nonPanelSources, ...newPanelSources];
+
+    // Walk up to update ancestors
+    const lastSlash = parentPath.lastIndexOf("/");
+    if (lastSlash > 0) {
+      updateParentProvenance(parentPath.slice(0, lastSlash));
+    }
+  }
+
   // ============================================
   // EXPORT FUNCTIONS
   // ============================================
@@ -1364,7 +1431,45 @@
 
     // Remove from source - but only if dragging within the merged panel
     // When dragging from left/right to merged, keep the original (duplicate it)
+    // For merged panel moves (non-leaf-merge): capture provenance, remove, clean up, and reindex
+    // Leaf merges handle their own provenance capture/cleanup above.
+    let capturedProvenanceForMove: LineageEntry | undefined;
+    let capturedChildProvenanceForMove: Map<string, LineageEntry> | undefined;
     if (sourcePanel === "merged") {
+      if (!mergeWithLeafItem) {
+        const dragSrcPath = sourcePath.slice(1).join("/");
+
+        // Capture provenance for the moved item and its children BEFORE removal
+        const topEntry = getLineageForPath(dragSrcPath, nodeIdMap, provenance);
+        if (topEntry) {
+          capturedProvenanceForMove = { sources: topEntry.sources.map((s) => ({ ...s })) };
+        }
+        const childPrefix = dragSrcPath + "/";
+        capturedChildProvenanceForMove = new Map();
+        for (const [path, nodeId] of nodeIdMap) {
+          if (path.startsWith(childPrefix)) {
+            const entry = provenance.get(nodeId);
+            if (entry && entry.sources.length > 0) {
+              capturedChildProvenanceForMove.set(path.slice(dragSrcPath.length), {
+                sources: entry.sources.map((s) => ({ ...s })),
+              });
+            }
+          }
+        }
+
+        // Clean up provenance at old path
+        unsubscribeItemAndChildren(dragSrcPath);
+
+        // Reindex source array siblings if this was an array item
+        if (isArrayItem) {
+          const draggedIndex = parseInt(sourcePath[sourcePath.length - 1], 10);
+          if (!isNaN(draggedIndex)) {
+            const parentPath = sourcePath.slice(1, -1).join("/");
+            reindexMergedArrayAfterDelete(parentPath, draggedIndex, dragSrcPath);
+          }
+        }
+      }
+
       const sourceData = dataSources[sourcePanel];
       if (sourceData) {
         removeFromData(sourceData, sourcePath.slice(1));
@@ -2400,20 +2505,41 @@
         if (isMerged) {
           markItemAsMerged(itemPath);
         }
+
+        // Update parent coloring to reflect the new child's source
+        updateParentProvenance(addedPath.slice(0, -1).join("/"));
       }
     }
 
-    // If moving within merged panel, update path mappings (sourceMap and nodeIdMap)
+    // If moving within merged panel, apply captured provenance at the new path
     if (sourcePanel === "merged" && targetPanel === "merged") {
-      const oldPath = sourcePath.slice(1).join("/");
       const newPath = addedPath.join("/");
 
-      if (oldPath !== newPath) {
-        console.log("Moving within merged panel:", oldPath, "->", newPath);
-
-        // Update nodeIdMap entries (sourceMap is derived automatically)
-        nodeIdMap = remapNodeIdPaths(nodeIdMap, oldPath, newPath);
+      // Apply captured provenance at the new location
+      if (capturedProvenanceForMove) {
+        if (!nodeIdMap.has(newPath)) {
+          nodeIdMap.set(newPath, generateNodeId());
+        }
+        for (const source of capturedProvenanceForMove.sources) {
+          addLineage(newPath, source.panel, source.originalPath, source.action);
+        }
       }
+      if (capturedChildProvenanceForMove) {
+        for (const [suffix, entry] of capturedChildProvenanceForMove) {
+          const childNewPath = newPath + suffix;
+          if (!nodeIdMap.has(childNewPath)) {
+            nodeIdMap.set(childNewPath, generateNodeId());
+          }
+          for (const source of entry.sources) {
+            addLineage(childNewPath, source.panel, source.originalPath, source.action);
+          }
+        }
+      }
+
+      // Recalculate parent provenance: after moving a leaf between parents,
+      // the source parent may no longer have contributions from both panels
+      updateParentProvenance(sourcePath.slice(1, -1).join("/"));
+      updateParentProvenance(addedPath.slice(0, -1).join("/"));
     }
 
     // Trigger reactivity
