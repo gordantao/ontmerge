@@ -22,6 +22,11 @@
     markProvenanceAsMerged,
     removeProvenanceForSubtree,
     cloneProvenance,
+    type V5MergeFile,
+    serializeNodeIdMap,
+    deserializeNodeIdMap,
+    serializeProvenance,
+    deserializeProvenance,
   } from "$lib/provenance";
 
   // Concept metadata from v4 ontology format
@@ -599,6 +604,44 @@
   }
 
   /**
+   * Export in v5 format — mirrors internal state directly.
+   * Name-keyed tree, stable UUIDs, provenance stored as-is.
+   */
+  function exportV5() {
+    const exportData: V5MergeFile = {
+      version: 5,
+      format: "name-keyed-with-provenance",
+      metadata: {
+        source: loadedFromSuggestion
+          ? (suggestionMetadata?.source ?? "webapp")
+          : "webapp",
+        llmModel: suggestionMetadata?.llmModel,
+        sessionId: suggestionMetadata?.sessionId ?? crypto.randomUUID(),
+        createdAt: new Date().toISOString(),
+        notes: loadedFromSuggestion
+          ? `Edited in webapp. Original source: ${suggestionMetadata?.source}`
+          : "Created in webapp",
+      },
+      ontologies: {
+        left: { name: "PathologyOutlines", path: "data/pathout_v4.json" },
+        right: {
+          name: "WHO Classification of Tumours",
+          path: "data/who_v4.json",
+        },
+      },
+      mergedData: $state.snapshot(mergedData),
+      nodeIdMap: serializeNodeIdMap(nodeIdMap),
+      provenance: serializeProvenance(provenance),
+      concepts: Object.fromEntries(conceptRegistry),
+      llmSuggestions: llmSuggestions ?? undefined,
+      pendingReview: pendingReviews ?? [],
+    };
+
+    const jsonStr = JSON.stringify(exportData, null, 2);
+    downloadFile(jsonStr, "merge_v5.json", "application/json");
+  }
+
+  /**
    * Recursively force lowercase for all term fields (name, synonyms).
    * Applied to imported data to ensure consistent casing.
    */
@@ -783,6 +826,23 @@
 
           nodeIdMap = newNodeIdMap;
           provenance = newProvenance;
+        } else if (imported.version === 5) {
+          const v5 = imported as V5MergeFile;
+          suggestionMetadata = v5.metadata as SuggestedMerge["metadata"];
+          pendingReviews = (v5.pendingReview || []) as SuggestedMerge["pendingReview"];
+          llmSuggestions = v5.llmSuggestions as SuggestedMerge["llmSuggestions"] || null;
+          loadedFromSuggestion = v5.metadata?.source === "llm";
+
+          // Merge v5 concept metadata into the registry
+          for (const [id, meta] of Object.entries(v5.concepts)) {
+            conceptRegistry.set(id, meta as ConceptMeta);
+          }
+          conceptRegistry = new Map(conceptRegistry);
+
+          // Direct restore — no conversion needed
+          mergedData = v5.mergedData;
+          nodeIdMap = deserializeNodeIdMap(v5.nodeIdMap);
+          provenance = deserializeProvenance(v5.provenance);
         }
 
         console.log("Imported merge file successfully");
@@ -3287,7 +3347,7 @@
     {canUndo}
     {canRedo}
     onImportFile={handleImportFile}
-    onExportV4={exportWithLineage}
+    onExportV4={exportV5}
     {sourceSortMode}
     onToggleSort={() => (sourceSortMode = sourceSortMode === "alphabetical" ? "status" : "alphabetical")}
   />

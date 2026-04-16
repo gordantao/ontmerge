@@ -19,6 +19,10 @@ import {
   reindexNodeIdsAfterDelete,
   reindexNodeIdsAfterInsert,
   remapNodeIdPaths,
+  serializeNodeIdMap,
+  deserializeNodeIdMap,
+  serializeProvenance,
+  deserializeProvenance,
 } from "./provenance";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -1561,5 +1565,114 @@ describe("regression: object-object merge with mismatched sub-key types", () => 
       ).toBeDefined();
       expect(entry!.sources.length).toBeGreaterThan(0);
     }
+  });
+});
+
+// ─── V5 serialization round-trip ─────────────────────────────────────────────
+
+describe("v5 serialization round-trip", () => {
+  it("nodeIdMap survives serialize → deserialize", () => {
+    const original = new Map<string, string>();
+    original.set("CNS tumor", "n_1_100");
+    original.set("CNS tumor/Medulloblastoma", "n_2_101");
+    original.set("CNS tumor/Medulloblastoma/0", "n_3_102");
+
+    const serialized = serializeNodeIdMap(original);
+    expect(typeof serialized).toBe("object");
+    expect(serialized["CNS tumor"]).toBe("n_1_100");
+
+    const deserialized = deserializeNodeIdMap(serialized);
+    expect(deserialized.size).toBe(original.size);
+    for (const [key, value] of original) {
+      expect(deserialized.get(key)).toBe(value);
+    }
+  });
+
+  it("provenance survives serialize → deserialize", () => {
+    const original = new Map<string, ProvenanceEntry>();
+    original.set("n_1_100", {
+      sources: [
+        { panel: "left", originalPath: "CNS tumor", action: "merged" },
+        { panel: "right", originalPath: "Central Nervous System Tumours", action: "merged" },
+      ],
+    });
+    original.set("n_2_101", {
+      sources: [
+        { panel: "right", originalPath: "CNS/Medulloblastoma", action: "added" },
+      ],
+    });
+
+    const serialized = serializeProvenance(original);
+    expect(typeof serialized).toBe("object");
+    expect(serialized["n_1_100"].sources).toHaveLength(2);
+
+    const deserialized = deserializeProvenance(serialized);
+    expect(deserialized.size).toBe(original.size);
+
+    const entry1 = deserialized.get("n_1_100")!;
+    expect(entry1.sources).toHaveLength(2);
+    expect(entry1.sources[0].panel).toBe("left");
+    expect(entry1.sources[0].originalPath).toBe("CNS tumor");
+    expect(entry1.sources[0].action).toBe("merged");
+    expect(entry1.sources[1].panel).toBe("right");
+
+    const entry2 = deserialized.get("n_2_101")!;
+    expect(entry2.sources).toHaveLength(1);
+    expect(entry2.sources[0].panel).toBe("right");
+  });
+
+  it("full round-trip preserves sourceMap derivation", () => {
+    // Build a provenance state
+    const nodeIdMap = new Map<string, string>();
+    const prov = new Map<string, ProvenanceEntry>();
+
+    const tree = { Section: { Sub: ["item1", "item2"] } };
+    assignNodeIds(tree, "", nodeIdMap);
+    recordProvenanceRecursive(prov, nodeIdMap, "Section", "LeftSection", "left", tree["Section"]);
+
+    const id = nodeIdMap.get("Section/Sub")!;
+    addProvenanceSource(prov, id, {
+      panel: "right",
+      originalPath: "RightSection/Sub",
+      action: "merged",
+    });
+
+    // Serialize
+    const serializedNim = serializeNodeIdMap(nodeIdMap);
+    const serializedProv = serializeProvenance(prov);
+
+    // Simulate JSON round-trip
+    const json = JSON.stringify({ nodeIdMap: serializedNim, provenance: serializedProv });
+    const parsed = JSON.parse(json);
+
+    // Deserialize
+    const restoredNim = deserializeNodeIdMap(parsed.nodeIdMap);
+    const restoredProv = deserializeProvenance(parsed.provenance);
+
+    // Verify sourceMap is identical
+    const originalSourceMap = buildSourceMap(nodeIdMap, prov);
+    const restoredSourceMap = buildSourceMap(restoredNim, restoredProv);
+
+    expect(restoredSourceMap.size).toBe(originalSourceMap.size);
+    for (const [path, source] of originalSourceMap) {
+      expect(restoredSourceMap.get(path)).toBe(source);
+    }
+
+    // Specific checks
+    expect(restoredSourceMap.get("Section")).toBe("left");
+    expect(restoredSourceMap.get("Section/Sub")).toBe("both");
+    expect(restoredSourceMap.get("Section/Sub/0")).toBe("left");
+    expect(restoredSourceMap.get("Section/Sub/1")).toBe("left");
+  });
+
+  it("empty maps serialize and deserialize correctly", () => {
+    const emptyNim = new Map<string, string>();
+    const emptyProv = new Map<string, ProvenanceEntry>();
+
+    const restoredNim = deserializeNodeIdMap(serializeNodeIdMap(emptyNim));
+    const restoredProv = deserializeProvenance(serializeProvenance(emptyProv));
+
+    expect(restoredNim.size).toBe(0);
+    expect(restoredProv.size).toBe(0);
   });
 });

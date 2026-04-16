@@ -512,3 +512,55 @@ export function getLineageForPath(
   if (!nodeId) return undefined;
   return provenance.get(nodeId);
 }
+
+// ─── V5 file format ─────────────────────────────────────────────────────────
+
+export interface V5MergeFile {
+  version: 5;
+  format: "name-keyed-with-provenance";
+  metadata: {
+    source: string;
+    llmModel?: string;
+    sessionId: string;
+    createdAt: string;
+    notes?: string;
+  };
+  ontologies: {
+    left: { name: string; path: string };
+    right: { name: string; path: string };
+  };
+  mergedData: unknown;
+  nodeIdMap: Record<string, string>;
+  provenance: Record<string, ProvenanceEntry>;
+  concepts: Record<string, unknown>;
+  llmSuggestions?: unknown;
+  pendingReview?: unknown[];
+}
+
+export function serializeNodeIdMap(
+  map: Map<string, string>,
+): Record<string, string> {
+  return Object.fromEntries(map);
+}
+
+export function deserializeNodeIdMap(
+  obj: Record<string, string>,
+): Map<string, string> {
+  return new Map(Object.entries(obj));
+}
+
+export function serializeProvenance(
+  map: Map<string, ProvenanceEntry>,
+): Record<string, ProvenanceEntry> {
+  return Object.fromEntries(map);
+}
+
+export function deserializeProvenance(
+  obj: Record<string, ProvenanceEntry>,
+): Map<string, ProvenanceEntry> {
+  const map = new Map<string, ProvenanceEntry>();
+  for (const [id, entry] of Object.entries(obj)) {
+    map.set(id, { sources: entry.sources.map((s) => ({ ...s })) });
+  }
+  return map;
+}
