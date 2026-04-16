@@ -1606,29 +1606,86 @@
           typeof value === "object" &&
           !Array.isArray(value)
         ) {
-          // Object-object merge: add keys from dragged, merge matching arrays
+          // Object-object merge: add keys from dragged, merge matching sub-keys
           for (const [k, v] of Object.entries(
             value as Record<string, unknown>,
           )) {
             if (!(k in (targetValue as Record<string, unknown>))) {
               (targetValue as Record<string, unknown>)[k] = v;
-            } else if (
-              Array.isArray(
-                (targetValue as Record<string, unknown>)[k],
-              ) &&
-              Array.isArray(v)
-            ) {
-              const arr = (targetValue as Record<string, unknown>)[
-                k
-              ] as unknown[];
-              for (const item of v as unknown[]) {
-                const isDuplicate = arr.some(
-                  (ex: unknown) =>
-                    typeof ex === typeof item &&
-                    String(ex) === String(item),
-                );
-                if (!isDuplicate) {
-                  arr.push(item);
+            } else {
+              const targetSub = (targetValue as Record<string, unknown>)[k];
+              if (Array.isArray(targetSub) && Array.isArray(v)) {
+                // Array+Array: merge items
+                for (const item of v as unknown[]) {
+                  const isDuplicate = targetSub.some(
+                    (ex: unknown) =>
+                      typeof ex === typeof item &&
+                      String(ex) === String(item),
+                  );
+                  if (!isDuplicate) {
+                    targetSub.push(item);
+                  }
+                }
+              } else if (
+                Array.isArray(targetSub) &&
+                typeof v === "object" &&
+                v !== null &&
+                !Array.isArray(v)
+              ) {
+                // Array target + Object dragged: convert array to object, merge
+                const converted: Record<string, unknown> = {};
+                for (const item of targetSub) {
+                  converted[String(item)] = null;
+                }
+                for (const [dk, dv] of Object.entries(
+                  v as Record<string, unknown>,
+                )) {
+                  if (!(dk in converted)) {
+                    converted[dk] = dv;
+                  }
+                }
+                (targetValue as Record<string, unknown>)[k] = converted;
+                // Remap nodeIdMap: old index-based → key-based paths
+                const subPath = targetItemPath ? `${targetItemPath}/${k}` : k;
+                for (let i = 0; i < targetSub.length; i++) {
+                  nodeIdMap = remapNodeIdPaths(
+                    nodeIdMap,
+                    `${subPath}/${i}`,
+                    `${subPath}/${String(targetSub[i])}`,
+                  );
+                }
+              } else if (
+                typeof targetSub === "object" &&
+                targetSub !== null &&
+                !Array.isArray(targetSub) &&
+                Array.isArray(v)
+              ) {
+                // Object target + Array dragged: add array items as leaf keys
+                for (const item of v as unknown[]) {
+                  const itemKey = String(item);
+                  if (
+                    !(itemKey in (targetSub as Record<string, unknown>))
+                  ) {
+                    (targetSub as Record<string, unknown>)[itemKey] = null;
+                  }
+                }
+              } else if (
+                typeof targetSub === "object" &&
+                targetSub !== null &&
+                !Array.isArray(targetSub) &&
+                typeof v === "object" &&
+                v !== null &&
+                !Array.isArray(v)
+              ) {
+                // Object+Object: add missing keys from dragged
+                for (const [dk, dv] of Object.entries(
+                  v as Record<string, unknown>,
+                )) {
+                  if (
+                    !(dk in (targetSub as Record<string, unknown>))
+                  ) {
+                    (targetSub as Record<string, unknown>)[dk] = dv;
+                  }
                 }
               }
             }

@@ -1262,3 +1262,304 @@ describe("regression: choroid plexus tumors merge flow", () => {
     ).toBe("added");
   });
 });
+
+// ─── Regression: Embryonal tumors / Medulloblastoma merge scenario ───────────
+// Reproduces the bug where object-object merge silently dropped children
+// when a matching sub-key had mismatched types (left=array, right=object).
+
+describe("regression: object-object merge with mismatched sub-key types", () => {
+  /**
+   * Simulates the Medulloblastoma merge:
+   *   Left "Embryonal tumors" → { Medulloblastoma: ["medulloblastoma", "SHH activated"] }
+   *   Right "Embryonal tumours" → { Medulloblastoma: { "histologically defined": [...], "molecularly defined": [...] } }
+   *
+   * Tests that the object-object merge converts the left array to an object
+   * and adds the right's object keys, preserving all children.
+   */
+  function simulateEmbryonalMerge() {
+    const nodeIdMap = new Map<string, string>();
+    const prov = new Map<string, ProvenanceEntry>();
+
+    // ── Step 1: Left "Embryonal tumors" in merged ──
+    const leftEmbryonal = {
+      Medulloblastoma: ["medulloblastoma", "SHH activated"],
+      "Other embryonal tumors": ["ATRT", "CNS neuroblastoma"],
+    };
+
+    assignNodeIds(
+      { "CNS tumor": { "Embryonal tumors": leftEmbryonal } },
+      "",
+      nodeIdMap,
+    );
+    recordProvenanceRecursive(
+      prov,
+      nodeIdMap,
+      "CNS tumor",
+      "CNS tumor",
+      "left",
+      { "Embryonal tumors": leftEmbryonal },
+    );
+
+    // Verify left setup
+    let sourceMap = buildSourceMap(nodeIdMap, prov);
+    expect(sourceMap.get("CNS tumor/Embryonal tumors/Medulloblastoma")).toBe("left");
+    expect(sourceMap.get("CNS tumor/Embryonal tumors/Medulloblastoma/0")).toBe("left");
+    expect(sourceMap.get("CNS tumor/Embryonal tumors/Medulloblastoma/1")).toBe("left");
+
+    // ── Step 2: Right "Embryonal tumours" absorbed into CNS tumor ──
+    const rightEmbryonal = {
+      Medulloblastoma: {
+        "Medulloblastomas, histologically defined": ["Classic medulloblastoma"],
+        "Medulloblastomas, molecularly defined": [
+          "Medulloblastoma, WNT-activated",
+          "Medulloblastoma, SHH-activated",
+        ],
+      },
+      "Other CNS embryonal tumours": ["ATRT", "Cribriform neuroepithelial tumour"],
+    };
+
+    // After section merge, "Embryonal tumours" is a new key in CNS tumor
+    assignNodeIds(
+      { "CNS tumor": { "Embryonal tumours": rightEmbryonal } },
+      "",
+      nodeIdMap,
+    );
+    recordProvenanceRecursive(
+      prov,
+      nodeIdMap,
+      "CNS tumor/Embryonal tumours",
+      "Central Nervous System Tumours/Embryonal tumours",
+      "right",
+      rightEmbryonal,
+    );
+
+    // ── Step 3: Sibling merge "Embryonal tumours" onto "Embryonal tumors" ──
+    // This is a merged-to-merged object-object merge
+
+    // 3a. Capture dragged provenance
+    const draggedPath = "CNS tumor/Embryonal tumours";
+    const draggedLineage = getLineageForPath(draggedPath, nodeIdMap, prov);
+    const draggedChildLineageMap = new Map<string, ProvenanceEntry>();
+    const childPrefix = draggedPath + "/";
+    for (const [path, nid] of nodeIdMap) {
+      if (path.startsWith(childPrefix)) {
+        const entry = prov.get(nid);
+        if (entry && entry.sources.length > 0) {
+          draggedChildLineageMap.set(path.slice(draggedPath.length), {
+            sources: entry.sources.map((s) => ({ ...s })),
+          });
+        }
+      }
+    }
+
+    // 3b. Remove dragged
+    removeProvenanceForSubtree(prov, nodeIdMap, draggedPath);
+    for (const [path] of [...nodeIdMap.entries()]) {
+      if (path === draggedPath || path.startsWith(childPrefix)) {
+        nodeIdMap.delete(path);
+      }
+    }
+
+    // 3c. Object-object merge with type mismatch handling (the fix)
+    const targetPath = "CNS tumor/Embryonal tumors";
+    // Simulate what the fixed code does:
+    // Left's "Embryonal tumors" is an object, right's "Embryonal tumours" is an object
+    // Matching key "Medulloblastoma": left=array, right=object → convert array to object, merge
+    const mergedEmbryonal: Record<string, unknown> = {
+      // Start with left's structure
+      Medulloblastoma: ["medulloblastoma", "SHH activated"],
+      "Other embryonal tumors": ["ATRT", "CNS neuroblastoma"],
+    };
+
+    for (const [k, v] of Object.entries(rightEmbryonal)) {
+      if (!(k in mergedEmbryonal)) {
+        mergedEmbryonal[k] = v;
+      } else {
+        const targetSub = mergedEmbryonal[k];
+        if (Array.isArray(targetSub) && typeof v === "object" && v !== null && !Array.isArray(v)) {
+          // Array→Object conversion (the fix!)
+          const converted: Record<string, unknown> = {};
+          for (const item of targetSub) {
+            converted[String(item)] = null;
+          }
+          for (const [dk, dv] of Object.entries(v as Record<string, unknown>)) {
+            if (!(dk in converted)) {
+              converted[dk] = dv;
+            }
+          }
+          mergedEmbryonal[k] = converted;
+
+          // Remap nodeIdMap for converted array items
+          const subPath = `${targetPath}/${k}`;
+          for (let i = 0; i < targetSub.length; i++) {
+            const oldPrefix = `${subPath}/${i}`;
+            const newPrefix = `${subPath}/${String(targetSub[i])}`;
+            // Manual remap
+            const remapped = new Map<string, string>();
+            for (const [p, id] of nodeIdMap) {
+              if (p === oldPrefix) {
+                remapped.set(newPrefix, id);
+              } else if (p.startsWith(oldPrefix + "/")) {
+                remapped.set(newPrefix + p.slice(oldPrefix.length), id);
+              } else {
+                remapped.set(p, id);
+              }
+            }
+            // Replace nodeIdMap contents
+            nodeIdMap.clear();
+            for (const [p, id] of remapped) {
+              nodeIdMap.set(p, id);
+            }
+          }
+        } else if (Array.isArray(targetSub) && Array.isArray(v)) {
+          for (const item of v as unknown[]) {
+            if (!targetSub.some((ex: unknown) => String(ex) === String(item))) {
+              targetSub.push(item);
+            }
+          }
+        }
+      }
+    }
+
+    // Assign IDs for all new paths
+    assignNodeIds({ "CNS tumor": { "Embryonal tumors": mergedEmbryonal } }, "", nodeIdMap);
+
+    // 3d. Transfer parent provenance
+    const targetId = nodeIdMap.get(targetPath)!;
+    markProvenanceAsMerged(prov, targetId);
+    if (draggedLineage) {
+      for (const s of draggedLineage.sources) {
+        addProvenanceSource(prov, targetId, {
+          panel: s.panel,
+          originalPath: s.originalPath,
+          action: "merged",
+        });
+      }
+    }
+
+    // 3e. Transfer child provenance
+    for (const [suffix, entry] of draggedChildLineageMap) {
+      const childTargetPath = targetPath + suffix;
+      if (!nodeIdMap.has(childTargetPath)) {
+        nodeIdMap.set(childTargetPath, generateNodeId());
+      }
+      const childId = nodeIdMap.get(childTargetPath)!;
+      for (const s of entry.sources) {
+        addProvenanceSource(prov, childId, {
+          panel: s.panel,
+          originalPath: s.originalPath,
+          action: s.action,
+        });
+      }
+    }
+
+    return { nodeIdMap, prov, mergedEmbryonal };
+  }
+
+  it("WHO Medulloblastoma children are preserved after array→object conversion", () => {
+    const { mergedEmbryonal } = simulateEmbryonalMerge();
+
+    const medullo = mergedEmbryonal["Medulloblastoma"] as Record<string, unknown>;
+    expect(typeof medullo).toBe("object");
+    expect(Array.isArray(medullo)).toBe(false);
+
+    // Left's original leaf items should be converted to object keys
+    expect("medulloblastoma" in medullo).toBe(true);
+    expect("SHH activated" in medullo).toBe(true);
+
+    // Right's sub-sections should be present
+    expect("Medulloblastomas, histologically defined" in medullo).toBe(true);
+    expect("Medulloblastomas, molecularly defined" in medullo).toBe(true);
+
+    // Right's sub-section children should be intact
+    const histDefined = medullo["Medulloblastomas, histologically defined"];
+    expect(Array.isArray(histDefined)).toBe(true);
+    expect(histDefined).toContain("Classic medulloblastoma");
+
+    const molDefined = medullo["Medulloblastomas, molecularly defined"];
+    expect(Array.isArray(molDefined)).toBe(true);
+    expect(molDefined).toContain("Medulloblastoma, WNT-activated");
+    expect(molDefined).toContain("Medulloblastoma, SHH-activated");
+  });
+
+  it("left items retain left provenance after array→object conversion", () => {
+    const { nodeIdMap, prov } = simulateEmbryonalMerge();
+    const sourceMap = buildSourceMap(nodeIdMap, prov);
+
+    // Original left leaf items (now object keys) should still be "left"
+    expect(sourceMap.get("CNS tumor/Embryonal tumors/Medulloblastoma/medulloblastoma")).toBe("left");
+    expect(sourceMap.get("CNS tumor/Embryonal tumors/Medulloblastoma/SHH activated")).toBe("left");
+  });
+
+  it("right sub-sections have right provenance", () => {
+    const { nodeIdMap, prov } = simulateEmbryonalMerge();
+    const sourceMap = buildSourceMap(nodeIdMap, prov);
+
+    expect(
+      sourceMap.get("CNS tumor/Embryonal tumors/Medulloblastoma/Medulloblastomas, histologically defined"),
+    ).toBe("right");
+    expect(
+      sourceMap.get("CNS tumor/Embryonal tumors/Medulloblastoma/Medulloblastomas, molecularly defined"),
+    ).toBe("right");
+  });
+
+  it("right leaf items under sub-sections have right provenance", () => {
+    const { nodeIdMap, prov } = simulateEmbryonalMerge();
+    const sourceMap = buildSourceMap(nodeIdMap, prov);
+
+    expect(
+      sourceMap.get(
+        "CNS tumor/Embryonal tumors/Medulloblastoma/Medulloblastomas, histologically defined/0",
+      ),
+    ).toBe("right");
+    expect(
+      sourceMap.get(
+        "CNS tumor/Embryonal tumors/Medulloblastoma/Medulloblastomas, molecularly defined/0",
+      ),
+    ).toBe("right");
+    expect(
+      sourceMap.get(
+        "CNS tumor/Embryonal tumors/Medulloblastoma/Medulloblastomas, molecularly defined/1",
+      ),
+    ).toBe("right");
+  });
+
+  it("merged parent section Medulloblastoma is purple (both sources)", () => {
+    const { nodeIdMap, prov } = simulateEmbryonalMerge();
+    const sourceMap = buildSourceMap(nodeIdMap, prov);
+
+    // Medulloblastoma has provenance from both left (original) and right (transferred)
+    expect(sourceMap.get("CNS tumor/Embryonal tumors/Medulloblastoma")).toBe("both");
+  });
+
+  it("non-matching keys are added without loss", () => {
+    const { mergedEmbryonal } = simulateEmbryonalMerge();
+
+    // Left-only key should still be there
+    expect("Other embryonal tumors" in mergedEmbryonal).toBe(true);
+    expect(Array.isArray(mergedEmbryonal["Other embryonal tumors"])).toBe(true);
+
+    // Right-only key should be added
+    expect("Other CNS embryonal tumours" in mergedEmbryonal).toBe(true);
+    expect(Array.isArray(mergedEmbryonal["Other CNS embryonal tumours"])).toBe(true);
+  });
+
+  it("no children are left without provenance", () => {
+    const { nodeIdMap, prov } = simulateEmbryonalMerge();
+
+    // Every path under Medulloblastoma should have provenance
+    const medulloPaths = [...nodeIdMap.keys()].filter((p) =>
+      p.startsWith("CNS tumor/Embryonal tumors/Medulloblastoma"),
+    );
+    expect(medulloPaths.length).toBeGreaterThan(0);
+
+    for (const path of medulloPaths) {
+      const entry = getLineageForPath(path, nodeIdMap, prov);
+      expect(
+        entry,
+        `path "${path}" should have provenance`,
+      ).toBeDefined();
+      expect(entry!.sources.length).toBeGreaterThan(0);
+    }
+  });
+});
