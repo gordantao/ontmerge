@@ -1562,6 +1562,8 @@
       // merge its children into the target section before updating metadata.
       // This handles sibling section merges (e.g., merging "Myeloma" into "Leukemia").
       let sectionMergeTargetValue: unknown = undefined;
+      // For array-array merges: maps old dragged index → new merged index
+      let arrayMergeIndexMap: Map<number, number> | undefined;
       if (value && typeof value === "object") {
         // Navigate to the target item in merged data
         let targetParent: any = mergedData;
@@ -1579,13 +1581,21 @@
 
         if (Array.isArray(targetValue) && Array.isArray(value)) {
           // Array-array merge: add non-duplicate items from dragged into target
-          for (const item of value as unknown[]) {
-            const isDuplicate = targetValue.some(
+          // Track where each dragged item ends up in the merged array
+          arrayMergeIndexMap = new Map();
+          let nextIdx = targetValue.length;
+          for (let i = 0; i < (value as unknown[]).length; i++) {
+            const item = (value as unknown[])[i];
+            const existingIdx = targetValue.findIndex(
               (ex: unknown) =>
                 typeof ex === typeof item && String(ex) === String(item),
             );
-            if (!isDuplicate) {
+            if (existingIdx !== -1) {
+              // Duplicate — maps to existing index
+              arrayMergeIndexMap.set(i, existingIdx);
+            } else {
               targetValue.push(item);
+              arrayMergeIndexMap.set(i, nextIdx++);
             }
           }
           sectionMergeTargetValue = targetValue;
@@ -1757,7 +1767,24 @@
         // Transfer children's captured provenance to new paths under targetItemPath
         if (draggedChildLineageMap && draggedChildLineageMap.size > 0) {
           for (const [suffix, entry] of draggedChildLineageMap) {
-            const childTargetPath = targetItemPath + suffix;
+            let childTargetPath: string;
+
+            if (arrayMergeIndexMap) {
+              // For array-array merges, remap old dragged indices to new merged indices
+              const match = suffix.match(/^\/(\d+)(\/.*)?$/);
+              if (match) {
+                const oldIdx = parseInt(match[1], 10);
+                const rest = match[2] || "";
+                const newIdx = arrayMergeIndexMap.get(oldIdx);
+                if (newIdx === undefined) continue; // item was lost
+                childTargetPath = `${targetItemPath}/${newIdx}${rest}`;
+              } else {
+                childTargetPath = targetItemPath + suffix;
+              }
+            } else {
+              childTargetPath = targetItemPath + suffix;
+            }
+
             // Ensure nodeIdMap entry exists
             if (!nodeIdMap.has(childTargetPath)) {
               nodeIdMap.set(childTargetPath, generateNodeId());

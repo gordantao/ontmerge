@@ -767,4 +767,172 @@ describe("end-to-end merge styling", () => {
     // Index 1 should not exist
     expect(sourceMap.has("Tumors/Brain tumors/1")).toBe(false);
   });
+
+  it("array-array sibling merge: dragged children get correct indices", () => {
+    // Simulate: left "Choroid plexus tumors" has 1 child at index 0
+    //           right "Choroid plexus tumours" has 3 children at indices 0, 1, 2
+    // After merging right onto left, merged array = [left-0, right-0, right-1, right-2]
+    // Provenance should: keep left-0 as "left", place right items at indices 1, 2, 3
+
+    const nodeIdMap = new Map<string, string>();
+    const prov = new Map<string, ProvenanceEntry>();
+
+    // Set up the left item at index 0
+    const parentId = generateNodeId();
+    nodeIdMap.set("Parent/Section", parentId);
+    addProvenanceSource(prov, parentId, {
+      panel: "left",
+      originalPath: "LeftParent/Section",
+      action: "added",
+    });
+
+    const leftChild0Id = generateNodeId();
+    nodeIdMap.set("Parent/Section/0", leftChild0Id);
+    addProvenanceSource(prov, leftChild0Id, {
+      panel: "left",
+      originalPath: "LeftParent/Section/0",
+      action: "added",
+    });
+
+    // Simulate the array-array merge: build index remap
+    const targetLenBefore = 1; // left had 1 item
+    const draggedItems = ["item-a", "item-b", "item-c"];
+    const targetItems = ["left-item-0"]; // no duplicates
+    const arrayMergeIndexMap = new Map<number, number>();
+    let nextIdx = targetLenBefore;
+    for (let i = 0; i < draggedItems.length; i++) {
+      const existingIdx = targetItems.findIndex((ex) => ex === draggedItems[i]);
+      if (existingIdx !== -1) {
+        arrayMergeIndexMap.set(i, existingIdx);
+      } else {
+        targetItems.push(draggedItems[i]);
+        arrayMergeIndexMap.set(i, nextIdx++);
+      }
+    }
+
+    // Verify the mapping: 0→1, 1→2, 2→3
+    expect(arrayMergeIndexMap.get(0)).toBe(1);
+    expect(arrayMergeIndexMap.get(1)).toBe(2);
+    expect(arrayMergeIndexMap.get(2)).toBe(3);
+
+    // Simulate transferring child provenance with remap
+    const draggedChildSuffixes = ["/0", "/1", "/2"];
+    const rightOrigPaths = [
+      "RightParent/Section/0",
+      "RightParent/Section/1",
+      "RightParent/Section/2",
+    ];
+
+    for (let i = 0; i < draggedChildSuffixes.length; i++) {
+      const suffix = draggedChildSuffixes[i];
+      const match = suffix.match(/^\/(\d+)(\/.*)?$/);
+      expect(match).not.toBeNull();
+      const oldIdx = parseInt(match![1], 10);
+      const rest = match![2] || "";
+      const newIdx = arrayMergeIndexMap.get(oldIdx);
+      expect(newIdx).toBeDefined();
+      const childTargetPath = `Parent/Section/${newIdx}${rest}`;
+
+      const childId = generateNodeId();
+      nodeIdMap.set(childTargetPath, childId);
+      addProvenanceSource(prov, childId, {
+        panel: "right",
+        originalPath: rightOrigPaths[i],
+        action: "added",
+      });
+    }
+
+    // Mark parent as merged
+    addProvenanceSource(prov, parentId, {
+      panel: "right",
+      originalPath: "RightParent/Section",
+      action: "merged",
+    });
+
+    const sourceMap = buildSourceMap(nodeIdMap, prov);
+
+    // Parent should be "both"
+    expect(sourceMap.get("Parent/Section")).toBe("both");
+    // Left child at index 0 should still be "left" only (NOT purple)
+    expect(sourceMap.get("Parent/Section/0")).toBe("left");
+    // Right children at indices 1, 2, 3 should be "right"
+    expect(sourceMap.get("Parent/Section/1")).toBe("right");
+    expect(sourceMap.get("Parent/Section/2")).toBe("right");
+    expect(sourceMap.get("Parent/Section/3")).toBe("right");
+  });
+
+  it("array-array sibling merge with duplicates: shared items get both sources", () => {
+    const nodeIdMap = new Map<string, string>();
+    const prov = new Map<string, ProvenanceEntry>();
+
+    // Left has ["alpha", "beta"] at indices 0, 1
+    const parentId = generateNodeId();
+    nodeIdMap.set("Section", parentId);
+    addProvenanceSource(prov, parentId, {
+      panel: "left",
+      originalPath: "LeftSection",
+      action: "added",
+    });
+
+    const left0Id = generateNodeId();
+    nodeIdMap.set("Section/0", left0Id);
+    addProvenanceSource(prov, left0Id, {
+      panel: "left",
+      originalPath: "LeftSection/0",
+      action: "added",
+    });
+
+    const left1Id = generateNodeId();
+    nodeIdMap.set("Section/1", left1Id);
+    addProvenanceSource(prov, left1Id, {
+      panel: "left",
+      originalPath: "LeftSection/1",
+      action: "added",
+    });
+
+    // Right has ["beta", "gamma"] — "beta" is duplicate with left index 1
+    const targetItems = ["alpha", "beta"];
+    const draggedItems = ["beta", "gamma"];
+
+    const arrayMergeIndexMap = new Map<number, number>();
+    let nextIdx = targetItems.length;
+    for (let i = 0; i < draggedItems.length; i++) {
+      const existingIdx = targetItems.findIndex((ex) => ex === draggedItems[i]);
+      if (existingIdx !== -1) {
+        arrayMergeIndexMap.set(i, existingIdx);
+      } else {
+        targetItems.push(draggedItems[i]);
+        arrayMergeIndexMap.set(i, nextIdx++);
+      }
+    }
+
+    // "beta" (dragged 0) → existing index 1, "gamma" (dragged 1) → new index 2
+    expect(arrayMergeIndexMap.get(0)).toBe(1);
+    expect(arrayMergeIndexMap.get(1)).toBe(2);
+
+    // Apply right provenance using remap
+    const rightOrigPaths = ["RightSection/0", "RightSection/1"];
+    for (let i = 0; i < draggedItems.length; i++) {
+      const newIdx = arrayMergeIndexMap.get(i)!;
+      const childPath = `Section/${newIdx}`;
+      if (!nodeIdMap.has(childPath)) {
+        nodeIdMap.set(childPath, generateNodeId());
+      }
+      const childId = nodeIdMap.get(childPath)!;
+      addProvenanceSource(prov, childId, {
+        panel: "right",
+        originalPath: rightOrigPaths[i],
+        action: "added",
+      });
+    }
+
+    const sourceMap = buildSourceMap(nodeIdMap, prov);
+
+    // "alpha" (index 0) — left only
+    expect(sourceMap.get("Section/0")).toBe("left");
+    // "beta" (index 1) — both (left + right duplicate)
+    expect(sourceMap.get("Section/1")).toBe("both");
+    // "gamma" (index 2) — right only
+    expect(sourceMap.get("Section/2")).toBe("right");
+  });
 });
