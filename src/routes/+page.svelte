@@ -1927,9 +1927,6 @@
                   draggedSource === "right" ||
                   draggedSource === "both"
                 ) {
-                  recordSource(addedPathStr, value, draggedSource);
-  
-
                   // Subscribe the added section to its source
                   if (draggedSource === "left" || draggedSource === "right") {
                     const draggedOriginalPath = sourcePath.slice(1).join("/");
@@ -2253,15 +2250,11 @@
                 }
               }
 
-              const addedPathStr = addedPath.join("/");
-              recordSource(addedPathStr, value, draggedSource);
-      
-
               // PUB/SUB: Subscribe the added section and its children
               if (draggedSource === "left" || draggedSource === "right") {
                 const originalPath = sourcePath.slice(1).join("/");
                 subscribeItemAndChildren(
-                  addedPathStr,
+                  addedPath.join("/"),
                   originalPath,
                   draggedSource,
                   value,
@@ -2317,74 +2310,31 @@
         sourcePanel === "merged")
     ) {
       const itemPath = addedPath.join("/");
-      // Determine source to record
-      let sourceToRecord = sourcePanel;
-      // If coming from merged panel, preserve its original source
-      if (sourcePanel === "merged") {
-        const originalSource = sourceMap.get(sourcePath.slice(1).join("/"));
-        if (originalSource) {
-          sourceToRecord = originalSource;
-        }
-      }
-      // Record source for this item and all its descendants
-      // recordSource will handle merging if item already exists with different source
-      if (
-        sourceToRecord === "left" ||
-        sourceToRecord === "right" ||
-        sourceToRecord === "both"
-      ) {
-        if (isSectionMerge) {
-          // For section merges, mark parent as "both" but keep children's original source
-          // Navigate to the merged data at itemPath to pass as mergedTree
-          let mergedAtItemPath: unknown = targetData;
-          for (const seg of addedPath) {
-            if (
-              mergedAtItemPath &&
-              typeof mergedAtItemPath === "object" &&
-              (mergedAtItemPath as Record<string, unknown>)[seg] !== undefined
-            ) {
-              mergedAtItemPath = (mergedAtItemPath as Record<string, unknown>)[
-                seg
-              ];
-            }
-          }
-          recordSourceForMergedSection(
-            itemPath,
-            value,
-            sourceToRecord,
-            mergedAtItemPath,
-          );
-        } else {
-          recordSource(itemPath, value, sourceToRecord);
-        }
+      // PUB/SUB: Subscribe the merged item to its source
+      if (sourcePanel === "left" || sourcePanel === "right") {
+        const originalPath = sourcePath.slice(1).join("/");
+        // Check if this resulted in a merge (source in sourceMap became "both")
+        const resultingSource = sourceMap.get(itemPath);
+        const isMerged = resultingSource === "both";
+        console.log(
+          "Regular drop - subscribing:",
+          originalPath,
+          "source:",
+          sourcePanel,
+          "isMerged:",
+          isMerged,
+        );
+        subscribeItemAndChildren(
+          itemPath,
+          originalPath,
+          sourcePanel,
+          value,
+          isMerged,
+        );
 
-
-        // PUB/SUB: Subscribe the merged item to its source
-        if (sourcePanel === "left" || sourcePanel === "right") {
-          const originalPath = sourcePath.slice(1).join("/");
-          // Check if this resulted in a merge (source in sourceMap became "both")
-          const resultingSource = sourceMap.get(itemPath);
-          const isMerged = resultingSource === "both";
-          console.log(
-            "Regular drop - subscribing:",
-            originalPath,
-            "source:",
-            sourcePanel,
-            "isMerged:",
-            isMerged,
-          );
-          subscribeItemAndChildren(
-            itemPath,
-            originalPath,
-            sourcePanel,
-            value,
-            isMerged,
-          );
-
-          // If this resulted in a merge, also mark any existing subscriptions as merged
-          if (isMerged) {
-            markItemAsMerged(itemPath);
-          }
+        // If this resulted in a merge, also mark any existing subscriptions as merged
+        if (isMerged) {
+          markItemAsMerged(itemPath);
         }
       }
     }
@@ -2438,27 +2388,6 @@
     if (next) {
       removeFromData(next, path.slice(1));
     }
-  }
-
-  // recordSource and recordSourceForMergedSection are no longer needed.
-  // sourceMap is now $derived from provenance. These are kept as no-ops
-  // for backward compat with existing call sites in handleDrop.
-  function recordSource(
-    _basePath: string,
-    _value: unknown,
-    _source: string,
-    _mergedTree?: unknown,
-  ) {
-    // No-op: sourceMap is derived from provenance
-  }
-
-  function recordSourceForMergedSection(
-    _basePath: string,
-    _value: unknown,
-    _source: string,
-    _mergedTree?: unknown,
-  ) {
-    // No-op: sourceMap is derived from provenance
   }
 
   /**
