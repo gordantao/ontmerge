@@ -936,3 +936,329 @@ describe("end-to-end merge styling", () => {
     expect(sourceMap.get("Section/2")).toBe("right");
   });
 });
+
+// ─── Regression: Choroid plexus tumors merge scenario ────────────────────────
+// Reproduces the exact bug from the log where:
+// 1. Left "Choroid plexus tumors" had 1 child (index 0)
+// 2. Right "Choroid plexus tumours" had 3 children (indices 0,1,2)
+// 3. After sibling merge, right children got wrong indices/colors
+
+describe("regression: choroid plexus tumors merge flow", () => {
+  /**
+   * Simulates the full 3-step merge from the bug report:
+   *   Step 1: Drop "CNS tumor" (left) → merged
+   *   Step 2: Drop "Central Nervous System Tumours" (right) onto "CNS tumor" → section merge
+   *   Step 3: Drop "Choroid plexus tumours" (merged sibling) onto "Choroid plexus tumors" → array merge
+   *
+   * Returns the final provenance state for assertions.
+   */
+  function simulateChoroidPlexusMerge() {
+    const nodeIdMap = new Map<string, string>();
+    const prov = new Map<string, ProvenanceEntry>();
+
+    // ── Step 1: Drop "CNS tumor" from left into merged ──
+    // Left tree: CNS tumor → { "Choroid plexus tumors": ["choroid plexus tumors papilloma atypical papilloma carcinoma"] }
+    const leftTree = {
+      "Choroid plexus tumors": [
+        "choroid plexus tumors papilloma atypical papilloma carcinoma",
+      ],
+    };
+
+    // Assign IDs and record provenance for the full subtree
+    assignNodeIds({ "CNS tumor": leftTree }, "", nodeIdMap);
+    recordProvenanceRecursive(
+      prov,
+      nodeIdMap,
+      "CNS tumor",
+      "CNS tumor",
+      "left",
+      leftTree,
+    );
+
+    // Verify step 1
+    let sourceMap = buildSourceMap(nodeIdMap, prov);
+    expect(sourceMap.get("CNS tumor")).toBe("left");
+    expect(sourceMap.get("CNS tumor/Choroid plexus tumors")).toBe("left");
+    expect(sourceMap.get("CNS tumor/Choroid plexus tumors/0")).toBe("left");
+
+    // ── Step 2: Section merge "Central Nervous System Tumours" (right) onto "CNS tumor" ──
+    // Right tree: { "Choroid plexus tumours": ["Choroid plexus papilloma", "Atypical choroid plexus papilloma", "Choroid plexus carcinoma"], ... }
+    // After absorption, merged CNS tumor gets the right's children as new keys
+    const rightChildren = {
+      "Choroid plexus tumours": [
+        "Choroid plexus papilloma",
+        "Atypical choroid plexus papilloma",
+        "Choroid plexus carcinoma",
+      ],
+    };
+
+    // The merged tree after absorption has both keys:
+    const mergedAfterAbsorb = {
+      "Choroid plexus tumors": [
+        "choroid plexus tumors papilloma atypical papilloma carcinoma",
+      ],
+      "Choroid plexus tumours": [
+        "Choroid plexus papilloma",
+        "Atypical choroid plexus papilloma",
+        "Choroid plexus carcinoma",
+      ],
+    };
+
+    // Assign IDs for new paths (non-destructive)
+    assignNodeIds({ "CNS tumor": mergedAfterAbsorb }, "", nodeIdMap);
+
+    // Mark parent "CNS tumor" as merged (it now has both sources)
+    const parentId = nodeIdMap.get("CNS tumor")!;
+    addProvenanceSource(prov, parentId, {
+      panel: "right",
+      originalPath: "Central Nervous System Tumours",
+      action: "merged",
+    });
+
+    // Record provenance for the absorbed right children
+    recordProvenanceRecursive(
+      prov,
+      nodeIdMap,
+      "CNS tumor/Choroid plexus tumours",
+      "Central Nervous System Tumours/Choroid plexus tumours",
+      "right",
+      rightChildren["Choroid plexus tumours"],
+    );
+
+    // Verify step 2: "Choroid plexus tumours" (with 'u') is right-only
+    sourceMap = buildSourceMap(nodeIdMap, prov);
+    expect(sourceMap.get("CNS tumor")).toBe("both");
+    expect(sourceMap.get("CNS tumor/Choroid plexus tumours")).toBe("right");
+    expect(sourceMap.get("CNS tumor/Choroid plexus tumours/0")).toBe("right");
+    expect(sourceMap.get("CNS tumor/Choroid plexus tumours/1")).toBe("right");
+    expect(sourceMap.get("CNS tumor/Choroid plexus tumours/2")).toBe("right");
+
+    // ── Step 3: Sibling merge "Choroid plexus tumours" onto "Choroid plexus tumors" ──
+    // This is a merged-to-merged drag (sourcePanel === "merged")
+
+    // 3a. Capture dragged item's provenance before removal
+    const draggedPath = "CNS tumor/Choroid plexus tumours";
+    const draggedLineage = getLineageForPath(draggedPath, nodeIdMap, prov);
+    const draggedChildLineageMap = new Map<string, ProvenanceEntry>();
+    const childPrefix = draggedPath + "/";
+    for (const [path, nid] of nodeIdMap) {
+      if (path.startsWith(childPrefix)) {
+        const entry = prov.get(nid);
+        if (entry && entry.sources.length > 0) {
+          const suffix = path.slice(draggedPath.length);
+          draggedChildLineageMap.set(suffix, {
+            sources: entry.sources.map((s) => ({ ...s })),
+          });
+        }
+      }
+    }
+
+    // 3b. Remove dragged item and its children from provenance
+    removeProvenanceForSubtree(prov, nodeIdMap, draggedPath);
+    // Also clean up nodeIdMap entries for the removed key
+    for (const [path] of [...nodeIdMap.entries()]) {
+      if (path === draggedPath || path.startsWith(childPrefix)) {
+        nodeIdMap.delete(path);
+      }
+    }
+
+    // 3c. Array-array merge: append right items to left's array
+    const targetPath = "CNS tumor/Choroid plexus tumors";
+    const targetArray = [
+      "choroid plexus tumors papilloma atypical papilloma carcinoma",
+    ];
+    const draggedArray = [
+      "Choroid plexus papilloma",
+      "Atypical choroid plexus papilloma",
+      "Choroid plexus carcinoma",
+    ];
+
+    // Build index remap (the fix)
+    const arrayMergeIndexMap = new Map<number, number>();
+    let nextIdx = targetArray.length;
+    for (let i = 0; i < draggedArray.length; i++) {
+      const existingIdx = targetArray.findIndex(
+        (ex) => typeof ex === typeof draggedArray[i] && String(ex) === String(draggedArray[i]),
+      );
+      if (existingIdx !== -1) {
+        arrayMergeIndexMap.set(i, existingIdx);
+      } else {
+        targetArray.push(draggedArray[i]);
+        arrayMergeIndexMap.set(i, nextIdx++);
+      }
+    }
+
+    // Assign IDs for newly appended items
+    for (let i = 1; i < targetArray.length; i++) {
+      const p = `${targetPath}/${i}`;
+      if (!nodeIdMap.has(p)) {
+        nodeIdMap.set(p, generateNodeId());
+      }
+    }
+
+    // 3d. Transfer parent provenance: mark target as merged
+    const targetId = nodeIdMap.get(targetPath)!;
+    markProvenanceAsMerged(prov, targetId);
+    if (draggedLineage) {
+      for (const s of draggedLineage.sources) {
+        addProvenanceSource(prov, targetId, {
+          panel: s.panel,
+          originalPath: s.originalPath,
+          action: "merged",
+        });
+      }
+    }
+
+    // 3e. Transfer children's provenance WITH index remap
+    for (const [suffix, entry] of draggedChildLineageMap) {
+      let childTargetPath: string;
+      const match = suffix.match(/^\/(\d+)(\/.*)?$/);
+      if (match && arrayMergeIndexMap) {
+        const oldIdx = parseInt(match[1], 10);
+        const rest = match[2] || "";
+        const newIdx = arrayMergeIndexMap.get(oldIdx);
+        if (newIdx === undefined) continue;
+        childTargetPath = `${targetPath}/${newIdx}${rest}`;
+      } else {
+        childTargetPath = targetPath + suffix;
+      }
+      if (!nodeIdMap.has(childTargetPath)) {
+        nodeIdMap.set(childTargetPath, generateNodeId());
+      }
+      const childId = nodeIdMap.get(childTargetPath)!;
+      for (const s of entry.sources) {
+        addProvenanceSource(prov, childId, {
+          panel: s.panel,
+          originalPath: s.originalPath,
+          action: s.action,
+        });
+      }
+    }
+
+    return { nodeIdMap, prov, targetArray };
+  }
+
+  it("left-only item at index 0 stays blue (not purple)", () => {
+    const { nodeIdMap, prov } = simulateChoroidPlexusMerge();
+    const sourceMap = buildSourceMap(nodeIdMap, prov);
+
+    // "choroid plexus tumors papilloma atypical papilloma carcinoma" (left, index 0)
+    // must remain "left" — the old bug made it "both" (purple)
+    expect(sourceMap.get("CNS tumor/Choroid plexus tumors/0")).toBe("left");
+  });
+
+  it("all right children have provenance at correct indices", () => {
+    const { nodeIdMap, prov } = simulateChoroidPlexusMerge();
+    const sourceMap = buildSourceMap(nodeIdMap, prov);
+
+    // Right items appended at indices 1, 2, 3 — all should be "right"
+    expect(sourceMap.get("CNS tumor/Choroid plexus tumors/1")).toBe("right");
+    expect(sourceMap.get("CNS tumor/Choroid plexus tumors/2")).toBe("right");
+    expect(sourceMap.get("CNS tumor/Choroid plexus tumors/3")).toBe("right");
+  });
+
+  it("no item is left without provenance (uncolored)", () => {
+    const { nodeIdMap, prov, targetArray } = simulateChoroidPlexusMerge();
+
+    // Every index in the merged array must have a provenance entry
+    for (let i = 0; i < targetArray.length; i++) {
+      const path = `CNS tumor/Choroid plexus tumors/${i}`;
+      const entry = getLineageForPath(path, nodeIdMap, prov);
+      expect(entry, `index ${i} ("${targetArray[i]}") should have provenance`).toBeDefined();
+      expect(entry!.sources.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("shift+hover originalPath points to correct source items", () => {
+    const { nodeIdMap, prov } = simulateChoroidPlexusMerge();
+
+    // Index 0: left item — originalPath should reference the left source
+    const entry0 = getLineageForPath("CNS tumor/Choroid plexus tumors/0", nodeIdMap, prov)!;
+    expect(entry0.sources).toHaveLength(1);
+    expect(entry0.sources[0].panel).toBe("left");
+    expect(entry0.sources[0].originalPath).toBe("CNS tumor/Choroid plexus tumors/0");
+
+    // Index 1: "Choroid plexus papilloma" — was right index 0
+    const entry1 = getLineageForPath("CNS tumor/Choroid plexus tumors/1", nodeIdMap, prov)!;
+    expect(entry1.sources).toHaveLength(1);
+    expect(entry1.sources[0].panel).toBe("right");
+    expect(entry1.sources[0].originalPath).toBe(
+      "Central Nervous System Tumours/Choroid plexus tumours/0",
+    );
+
+    // Index 2: "Atypical choroid plexus papilloma" — was right index 1
+    const entry2 = getLineageForPath("CNS tumor/Choroid plexus tumors/2", nodeIdMap, prov)!;
+    expect(entry2.sources).toHaveLength(1);
+    expect(entry2.sources[0].panel).toBe("right");
+    expect(entry2.sources[0].originalPath).toBe(
+      "Central Nervous System Tumours/Choroid plexus tumours/1",
+    );
+
+    // Index 3: "Choroid plexus carcinoma" — was right index 2
+    const entry3 = getLineageForPath("CNS tumor/Choroid plexus tumors/3", nodeIdMap, prov)!;
+    expect(entry3.sources).toHaveLength(1);
+    expect(entry3.sources[0].panel).toBe("right");
+    expect(entry3.sources[0].originalPath).toBe(
+      "Central Nervous System Tumours/Choroid plexus tumours/2",
+    );
+  });
+
+  it("merged parent section is purple (both sources)", () => {
+    const { nodeIdMap, prov } = simulateChoroidPlexusMerge();
+    const sourceMap = buildSourceMap(nodeIdMap, prov);
+
+    expect(sourceMap.get("CNS tumor/Choroid plexus tumors")).toBe("both");
+  });
+
+  it("source usage map reflects correct panels after merge", () => {
+    const { nodeIdMap, prov } = simulateChoroidPlexusMerge();
+
+    // Build a left-panel usage map
+    // The left source paths referenced in provenance should show as used
+    const leftPathToId = new Map<string, string>();
+    leftPathToId.set("CNS tumor", generateNodeId());
+    leftPathToId.set("CNS tumor/Choroid plexus tumors", generateNodeId());
+    leftPathToId.set("CNS tumor/Choroid plexus tumors/0", generateNodeId());
+
+    const leftUsage = buildUsageMap("left", leftPathToId, prov);
+    // The left parent and child should be marked as used
+    expect(leftUsage.get("CNS tumor")).toBe("merged");
+    expect(leftUsage.get("CNS tumor/Choroid plexus tumors")).toBe("merged");
+    expect(leftUsage.get("CNS tumor/Choroid plexus tumors/0")).toBe("added");
+
+    // Build a right-panel usage map
+    const rightPathToId = new Map<string, string>();
+    rightPathToId.set("Central Nervous System Tumours", generateNodeId());
+    rightPathToId.set(
+      "Central Nervous System Tumours/Choroid plexus tumours",
+      generateNodeId(),
+    );
+    rightPathToId.set(
+      "Central Nervous System Tumours/Choroid plexus tumours/0",
+      generateNodeId(),
+    );
+    rightPathToId.set(
+      "Central Nervous System Tumours/Choroid plexus tumours/1",
+      generateNodeId(),
+    );
+    rightPathToId.set(
+      "Central Nervous System Tumours/Choroid plexus tumours/2",
+      generateNodeId(),
+    );
+
+    const rightUsage = buildUsageMap("right", rightPathToId, prov);
+    expect(rightUsage.get("Central Nervous System Tumours")).toBe("merged");
+    expect(
+      rightUsage.get("Central Nervous System Tumours/Choroid plexus tumours"),
+    ).toBe("merged");
+    expect(
+      rightUsage.get("Central Nervous System Tumours/Choroid plexus tumours/0"),
+    ).toBe("added");
+    expect(
+      rightUsage.get("Central Nervous System Tumours/Choroid plexus tumours/1"),
+    ).toBe("added");
+    expect(
+      rightUsage.get("Central Nervous System Tumours/Choroid plexus tumours/2"),
+    ).toBe("added");
+  });
+});
