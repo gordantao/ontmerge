@@ -1216,16 +1216,22 @@
         }
       } else {
         Object.entries(value as Record<string, unknown>).forEach(([key, val]) => {
+          const childMergedPath = `${mergedPath}/${key}`;
           const mergedChild =
             mergedTree && typeof mergedTree === "object" && !Array.isArray(mergedTree)
               ? (mergedTree as Record<string, unknown>)[key]
               : undefined;
+          // Check if child already has provenance from the other panel → merge
+          const existingEntry = getLineageForPath(childMergedPath, nodeIdMap, provenance);
+          const childIsMerged = existingEntry
+            ? existingEntry.sources.some((s) => (s.panel === "left" || s.panel === "right") && s.panel !== source)
+            : false;
           subscribeItemAndChildren(
-            `${mergedPath}/${key}`,
+            childMergedPath,
             `${sourcePath}/${key}`,
             source,
             val,
-            false,
+            childIsMerged,
             trackLineage,
             mergedChild,
           );
@@ -1254,10 +1260,17 @@
   }
 
   /**
-   * Mark a merged item's provenance as "merged" (combined from both sources).
+   * Mark a merged item and all its children's provenance as "merged".
    */
   function markItemAsMerged(mergedPath: string) {
     markLineageAsMerged(mergedPath);
+    // Also mark all children
+    const prefix = mergedPath + "/";
+    for (const [path] of nodeIdMap) {
+      if (path.startsWith(prefix)) {
+        markLineageAsMerged(path);
+      }
+    }
   }
 
   /**
@@ -1648,6 +1661,7 @@
       if (sourcePanel === "left") leftData = { ...leftData };
       if (sourcePanel === "right") rightData = { ...rightData };
       if (sourcePanel === "merged") mergedData = { ...mergedData };
+      invalidateProvenance();
 
       return;
     }
@@ -2326,9 +2340,13 @@
       // PUB/SUB: Subscribe the merged item to its source
       if (sourcePanel === "left" || sourcePanel === "right") {
         const originalPath = sourcePath.slice(1).join("/");
-        // Check if this resulted in a merge (source in sourceMap became "both")
-        const resultingSource = sourceMap.get(itemPath);
-        const isMerged = resultingSource === "both";
+        // Check if this is a merge: does the item already have provenance from the other panel?
+        const existingEntry = getLineageForPath(itemPath, nodeIdMap, provenance);
+        const isMerged = existingEntry
+          ? existingEntry.sources.some(
+              (s) => (s.panel === "left" || s.panel === "right") && s.panel !== sourcePanel,
+            )
+          : false;
         console.log(
           "Regular drop - subscribing:",
           originalPath,
