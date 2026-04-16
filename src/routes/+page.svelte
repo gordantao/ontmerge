@@ -159,6 +159,15 @@
   // These wrap the provenance system to maintain the same call signatures used
   // throughout handleDrop and other code, minimizing churn.
 
+  /**
+   * Force Svelte to see nodeIdMap and provenance as changed,
+   * so $derived sourceMap / usageMaps recompute.
+   */
+  function invalidateProvenance() {
+    nodeIdMap = new Map(nodeIdMap);
+    provenance = new Map(provenance);
+  }
+
   function addLineage(
     mergedPath: string,
     panel: ProvenancePanel,
@@ -1721,6 +1730,7 @@
           if (sourcePanel === "left") leftData = { ...leftData };
           if (sourcePanel === "right") rightData = { ...rightData };
           if (targetPanel === "merged") mergedData = { ...mergedData };
+          invalidateProvenance();
           return;
         } else if (Array.isArray(targetContainer)) {
           // Dropping into an array (section is expanded, so adding to children)
@@ -2020,6 +2030,7 @@
             if (targetPanel === "left") leftData = { ...leftData };
             if (targetPanel === "right") rightData = { ...rightData };
             if (targetPanel === "merged") mergedData = { ...mergedData };
+            invalidateProvenance();
             return;
           } else if (Array.isArray(targetObj) && Array.isArray(value)) {
             // Target is an array, and we're dropping an array onto it
@@ -2210,6 +2221,7 @@
             if (targetPanel === "left") leftData = { ...leftData };
             if (targetPanel === "right") rightData = { ...rightData };
             if (targetPanel === "merged") mergedData = { ...mergedData };
+            invalidateProvenance();
             return;
           } else if (
             Array.isArray(targetObj) &&
@@ -2270,6 +2282,7 @@
             if (targetPanel === "left") leftData = { ...leftData };
             if (targetPanel === "right") rightData = { ...rightData };
             if (targetPanel === "merged") mergedData = { ...mergedData };
+            invalidateProvenance();
             return;
           }
         } else {
@@ -2359,6 +2372,7 @@
     if (targetPanel === "left") leftData = { ...leftData };
     if (targetPanel === "right") rightData = { ...rightData };
     if (targetPanel === "merged") mergedData = { ...mergedData };
+    invalidateProvenance();
   }
 
   /**
@@ -2683,6 +2697,7 @@
     if (panelId === "left") leftData = { ...leftData };
     if (panelId === "right") rightData = { ...rightData };
     if (panelId === "merged") mergedData = { ...mergedData };
+    if (panelId === "merged") invalidateProvenance();
   }
 
   /**
@@ -2706,6 +2721,7 @@
     ]);
 
     mergedData = { ...mergedData };
+    invalidateProvenance();
   }
 
   /**
@@ -2755,6 +2771,7 @@
     if (panelId === "left") leftData = { ...leftData };
     if (panelId === "right") rightData = { ...rightData };
     if (panelId === "merged") mergedData = { ...mergedData };
+    if (panelId === "merged") invalidateProvenance();
   }
 
   const panels = [
