@@ -1332,9 +1332,10 @@
       targetPanel,
     );
 
-    // For leaf merges from merged panel, capture the provenance BEFORE removing
+    // For leaf merges from merged panel, capture provenance for the ENTIRE subtree BEFORE removing
     let draggedSourceForLeafMerge: string | undefined;
     let draggedLineageForLeafMerge: LineageEntry | undefined;
+    let draggedChildLineageMap: Map<string, LineageEntry> | undefined;
     if (mergeWithLeafItem && sourcePanel === "merged") {
       const draggedSourcePath = sourcePath.slice(1).join("/");
       draggedSourceForLeafMerge = sourceMap.get(draggedSourcePath);
@@ -1344,6 +1345,20 @@
         draggedLineageForLeafMerge = {
           sources: draggedLineageEntry.sources.map((s) => ({ ...s })),
         };
+      }
+      // Capture children's provenance too (suffix relative to dragged root)
+      const childPrefix = draggedSourcePath + "/";
+      draggedChildLineageMap = new Map();
+      for (const [path, nodeId] of nodeIdMap) {
+        if (path.startsWith(childPrefix)) {
+          const entry = provenance.get(nodeId);
+          if (entry && entry.sources.length > 0) {
+            const relativeSuffix = path.slice(draggedSourcePath.length); // e.g. "/childKey"
+            draggedChildLineageMap.set(relativeSuffix, {
+              sources: entry.sources.map((s) => ({ ...s })),
+            });
+          }
+        }
       }
     }
 
@@ -1621,7 +1636,7 @@
           sectionMergeTargetValue,
         );
       } else if (sourcePanel === "merged") {
-        // Transfer pre-captured lineage from dragged item to target
+        // Transfer pre-captured lineage from dragged item to target (parent)
         const draggedLineage = draggedLineageForLeafMerge;
         if (draggedLineage) {
           markLineageAsMerged(targetItemPath);
@@ -1632,6 +1647,24 @@
               source.originalPath,
               "merged",
             );
+          }
+        }
+        // Transfer children's captured provenance to new paths under targetItemPath
+        if (draggedChildLineageMap && draggedChildLineageMap.size > 0) {
+          for (const [suffix, entry] of draggedChildLineageMap) {
+            const childTargetPath = targetItemPath + suffix;
+            // Ensure nodeIdMap entry exists
+            if (!nodeIdMap.has(childTargetPath)) {
+              nodeIdMap.set(childTargetPath, generateNodeId());
+            }
+            for (const source of entry.sources) {
+              addLineage(
+                childTargetPath,
+                source.panel,
+                source.originalPath,
+                source.action,
+              );
+            }
           }
         }
       }
