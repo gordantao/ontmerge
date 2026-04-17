@@ -22,6 +22,7 @@
     markProvenanceAsMerged,
     removeProvenanceForSubtree,
     cloneProvenance,
+    ensureSubtreeProvenance,
     type V5MergeFile,
     serializeNodeIdMap,
     deserializeNodeIdMap,
@@ -843,6 +844,7 @@
           mergedData = v5.mergedData;
           nodeIdMap = deserializeNodeIdMap(v5.nodeIdMap);
           provenance = deserializeProvenance(v5.provenance);
+          invalidateProvenance();
         }
 
         console.log("Imported merge file successfully");
@@ -1915,6 +1917,31 @@
               );
             }
           }
+        }
+      }
+
+      // Safety net: ensure every path in the target subtree has nodeIdMap + provenance.
+      // The object-object merge with type mismatches can create new tree paths that
+      // the draggedChildLineageMap transfer doesn't fully cover.
+      if (sourcePanel === "merged" && draggedLineageForLeafMerge) {
+        // Navigate to the target subtree in merged data
+        const parts = targetItemPath.split("/");
+        let subtree: unknown = mergedData;
+        for (const part of parts) {
+          if (subtree && typeof subtree === "object") {
+            if (Array.isArray(subtree)) {
+              subtree = subtree[parseInt(part, 10)];
+            } else {
+              subtree = (subtree as Record<string, unknown>)[part];
+            }
+          } else {
+            subtree = undefined;
+            break;
+          }
+        }
+        if (subtree !== undefined) {
+          const fallbackSources = draggedLineageForLeafMerge.sources.map((s) => ({ ...s }));
+          ensureSubtreeProvenance(subtree, targetItemPath, nodeIdMap, provenance, fallbackSources);
         }
       }
 

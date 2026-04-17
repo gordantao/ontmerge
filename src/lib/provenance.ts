@@ -485,6 +485,43 @@ export function cloneProvenance(
 }
 
 /**
+ * Walk a subtree and ensure every data path has both a nodeIdMap entry and provenance.
+ * Paths that already have provenance are left unchanged.
+ * New paths (created during merges but missed by provenance transfer) inherit
+ * from the provided fallback sources.
+ */
+export function ensureSubtreeProvenance(
+  obj: unknown,
+  basePath: string,
+  nodeIdMap: Map<string, string>,
+  provenance: Map<string, ProvenanceEntry>,
+  fallbackSources: ProvenanceSource[],
+): void {
+  if (!obj || typeof obj !== "object") return;
+
+  const entries: [string, unknown][] = Array.isArray(obj)
+    ? obj.map((item, idx) => [String(idx), item])
+    : Object.entries(obj as Record<string, unknown>);
+
+  for (const [key, value] of entries) {
+    const path = basePath ? `${basePath}/${key}` : key;
+    // Ensure nodeIdMap entry
+    let nodeId = nodeIdMap.get(path);
+    if (!nodeId) {
+      nodeId = generateNodeId();
+      nodeIdMap.set(path, nodeId);
+    }
+    // Ensure provenance entry
+    const entry = provenance.get(nodeId);
+    if (!entry || entry.sources.length === 0) {
+      provenance.set(nodeId, { sources: fallbackSources.map((s) => ({ ...s })) });
+    }
+    // Recurse
+    ensureSubtreeProvenance(value, path, nodeIdMap, provenance, fallbackSources);
+  }
+}
+
+/**
  * Build a "sourceMap" equivalent: mergedPath → "left" | "right" | "both" | "created"
  * Used for coloring in the merged panel TreeView.
  */

@@ -86,7 +86,7 @@
     if (source === "left") return "text-red-600 dark:text-red-400";
     if (source === "right") return "text-blue-600 dark:text-blue-400";
     if (source === "both") return "text-purple-600 dark:text-purple-400";
-    if (source === "created") return "text-black dark:text-white";
+    if (source === "created") return "text-green-600 dark:text-green-400";
     return "";
   }
 

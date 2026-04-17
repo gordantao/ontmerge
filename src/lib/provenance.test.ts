@@ -23,6 +23,7 @@ import {
   deserializeNodeIdMap,
   serializeProvenance,
   deserializeProvenance,
+  ensureSubtreeProvenance,
 } from "./provenance";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -1457,6 +1458,17 @@ describe("regression: object-object merge with mismatched sub-key types", () => 
       }
     }
 
+    // 3f. Safety net: ensure all subtree paths have nodeIdMap + provenance
+    if (draggedLineage) {
+      ensureSubtreeProvenance(
+        mergedEmbryonal,
+        targetPath,
+        nodeIdMap,
+        prov,
+        draggedLineage.sources.map((s) => ({ ...s })),
+      );
+    }
+
     return { nodeIdMap, prov, mergedEmbryonal };
   }
 
@@ -1674,5 +1686,61 @@ describe("v5 serialization round-trip", () => {
 
     expect(restoredNim.size).toBe(0);
     expect(restoredProv.size).toBe(0);
+  });
+});
+
+// ─── ensureSubtreeProvenance ─────────────────────────────────────────────────
+
+describe("ensureSubtreeProvenance", () => {
+  it("fills missing nodeIdMap and provenance entries with fallback sources", () => {
+    const nodeIdMap = new Map<string, string>();
+    const prov = new Map<string, ProvenanceEntry>();
+
+    // Only register the root, leave children empty
+    const rootId = generateNodeId();
+    nodeIdMap.set("Section", rootId);
+    prov.set(rootId, { sources: [src("left", "LeftSection", "added")] });
+
+    const tree = { Sub1: ["leaf1", "leaf2"], Sub2: null };
+    const fallback: ProvenanceSource[] = [src("right", "RightSection", "added")];
+
+    ensureSubtreeProvenance(tree, "Section", nodeIdMap, prov, fallback);
+
+    // Sub1 should now have nodeIdMap + fallback provenance
+    expect(nodeIdMap.has("Section/Sub1")).toBe(true);
+    const sub1Entry = prov.get(nodeIdMap.get("Section/Sub1")!);
+    expect(sub1Entry).toBeDefined();
+    expect(sub1Entry!.sources[0].panel).toBe("right");
+
+    // leaf items under Sub1
+    expect(nodeIdMap.has("Section/Sub1/0")).toBe(true);
+    expect(nodeIdMap.has("Section/Sub1/1")).toBe(true);
+    const leaf1Entry = prov.get(nodeIdMap.get("Section/Sub1/0")!);
+    expect(leaf1Entry).toBeDefined();
+    expect(leaf1Entry!.sources[0].panel).toBe("right");
+  });
+
+  it("does not overwrite existing provenance entries", () => {
+    const nodeIdMap = new Map<string, string>();
+    const prov = new Map<string, ProvenanceEntry>();
+
+    // Pre-register a child with left source
+    const childId = generateNodeId();
+    nodeIdMap.set("Root/Child", childId);
+    prov.set(childId, { sources: [src("left", "LeftChild", "added")] });
+
+    const tree = { Child: ["leaf"] };
+    const fallback: ProvenanceSource[] = [src("right", "RightChild", "added")];
+
+    ensureSubtreeProvenance(tree, "Root", nodeIdMap, prov, fallback);
+
+    // Child should still have left provenance (not overwritten)
+    const entry = prov.get(nodeIdMap.get("Root/Child")!)!;
+    expect(entry.sources).toHaveLength(1);
+    expect(entry.sources[0].panel).toBe("left");
+
+    // But the leaf should get fallback provenance
+    const leafEntry = prov.get(nodeIdMap.get("Root/Child/0")!)!;
+    expect(leafEntry.sources[0].panel).toBe("right");
   });
 });
